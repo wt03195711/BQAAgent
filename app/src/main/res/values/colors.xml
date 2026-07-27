@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Text -->
+    <color name="colorTextPrimary">#FF1D1D1B</color>
+    <color name="colorTextSecondary">#FF4D4D4D</color>
+    <color name="colorTextTertiary">#FF767676</color>
+    <color name="colorTextDisabled">#33000000</color>
+    <color name="colorTextInverse">#FFFFFFFF</color>
+    <color name="colorTextFixedWhitePrimary">#E6FFFFFF</color>
+    <color name="colorTextFixedWhiteSecondary">#99FFFFFF</color>
+    <color name="colorTextFixedBlackPrimary">#F5000000</color>
+    <color name="colorTextFixedBlackSecondary">#AD000000</color>
+
+    <!-- Fills -->
+    <color name="colorFillPrimary">#33787880</color>
+    <color name="colorFillSecondary">#29787880</color>
+    <color name="colorFillTertiary">#1F787880</color>
+    <color name="colorFillQuaternary">#14787880</color>
+
+    <!-- Containers -->
+    <color name="colorContainerBrighten">#FFFFFFFF</color>
+    <color name="colorContainerLow">#FFFAFAFA</color>
+    <color name="colorContainerBase">#FFF5F5F5</color>
+    <color name="colorContainerHigh">#FFE6E6E6</color>
+    <color name="colorContainerHighest">#FFD7D8D6</color>
+    <color name="colorContainerInverse">#FF1D1D1B</color>
+
+    <!-- Backgrounds -->
+    <color name="colorBgPrimary">#FFFFFFFF</color>
+    <color name="colorBgSecondary">#FFF5F5F5</color>
+    <color name="colorBgTertiary">#FFFFFFFF</color>
+
+    <!-- Chat (HSBC-inspired light) -->
+    <color name="colorChatUserBubble">#FFDB0011</color>
+    <color name="colorChatAiBubble">#FFFFFFFF</color>
+    <color name="colorChatAiBubbleBorder">#FFD7D8D6</color>
+    <color name="colorChatAvatarBg">#FFDB0011</color>
+    <color name="colorChatInputBorder">#FFB7B7B7</color>
+    <color name="colorChatSendText">#FFDB0011</color>
+    <color name="colorChatToolOk">#FFDB0011</color>
+    <color name="colorChatToolDefault">#FF767676</color>
+    <color name="colorChatDivider">#FFE6E6E6</color>
+
+    <!-- Borders & Dividers -->
+    <color name="colorBorderLow">#FFEDEDED</color>
+    <color name="colorBorderBase">#FFD7D8D6</color>
+    <color name="colorBorderHigh">#FFB7B7B7</color>
+
+    <!-- Overlays -->
+    <color name="colorOverlayDim">#80000000</color>
+    <color name="colorOverlayScrim">#33000000</color>
+    <color name="colorOverlayLabel">#AD000000</color>
+
+    <!-- Brand -->
+    <color name="colorBrandPrimary">#FFDB0011</color>
+    <color name="colorBrandOnPrimary">#FFFFFFFF</color>
+    <color name="colorBrandContainer">#FFFFF2F3</color>
+    <color name="colorBrandOnContainer">#FF8A000A</color>
+    <color name="colorBrandFixedOnContainer">#FF8A000A</color>
+    <color name="colorBrandVariant">#FFB0000E</color>
+    <color name="colorBrandOnVariant">#FFFFFFFF</color>
+    <color name="colorBrandLowButtonBg">#FFFFE5E7</color>
+
+    <!-- Error -->
+    <color name="colorErrorPrimary">#FFF6685D</color>
+    <color name="colorErrorOnPrimary">#FFFFFFFF</color>
+    <color name="colorErrorContainer">#FFFFF8F7</color>
+    <color name="colorErrorOnContainer">#FFD54941</color>
+
+    <!-- Warning -->
+    <color name="colorWarningPrimary">#FFE37318</color>
+    <color name="colorWarningOnPrimary">#FFFFFFFF</color>
+    <color name="colorWarningContainer">#FFFFF9F6</color>
+    <color name="colorWarningOnContainer">#FFBE5A00</color>
+
+    <!-- Success -->
+    <color name="colorSuccessPrimary">#FF2BA471</color>
+    <color name="colorSuccessOnPrimary">#FFFFFFFF</color>
+    <color name="colorSuccessContainer">#FFE3F9E9</color>
+    <color name="colorSuccessOnContainer">#FF006C45</color>
+
+    <!-- Info -->
+    <color name="colorInfoPrimary">#FF1AAFFF</color>
+    <color name="colorInfoOnPrimary">#FFFFFFFF</color>
+    <color name="colorInfoContainer">#FFEEF9FF</color>
+    <color name="colorInfoOnContainer">#FF007BBE</color>
+</resources>

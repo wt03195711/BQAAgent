@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" role="img" aria-labelledby="title desc">
+  <title id="title">BQAAgent icon</title>
+  <desc id="desc">A red and white geometric masterbrand mark without text.</desc>
+  <rect x="31.5" y="31.5" width="45" height="45" fill="#fff"/>
+  <polygon fill="#db0011" points="76.5 31.5 76.5 76.5 99 54 76.5 31.5"/>
+  <polygon fill="#db0011" points="31.5 31.5 54 54 76.5 31.5 31.5 31.5"/>
+  <polygon fill="#db0011" points="31.5 31.5 9 54 31.5 76.5 31.5 31.5"/>
+  <polygon fill="#db0011" points="31.5 76.5 76.5 76.5 54 54 31.5 76.5"/>
+</svg>

@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_dialog"
+    android:orientation="vertical"
+    android:paddingHorizontal="16dp"
+    android:paddingTop="24dp"
+    android:paddingBottom="40dp">
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="44dp">
+
+        <ImageView
+            android:id="@+id/btnClose"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_gravity="start|center_vertical"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/common_close"
+            android:padding="10dp"
+            android:src="@drawable/ic_close" />
+
+        <TextView
+            android:id="@+id/tvTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="@string/local_adb_setup_title"
+            android:textColor="@color/colorTextPrimary"
+            android:textSize="17dp"
+            android:textStyle="bold" />
+
+    </FrameLayout>
+
+    <Space
+        android:layout_width="0dp"
+        android:layout_height="20dp" />
+
+    <TextView
+        android:id="@+id/tvLocalAdbIpLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/local_adb_ip_label"
+        android:textColor="@color/colorTextSecondary"
+        android:textSize="13dp" />
+
+    <FrameLayout
+        android:id="@+id/ipContainer"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_input_field">
+
+        <EditText
+            android:id="@+id/etLocalAdbIp"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@null"
+            android:paddingHorizontal="16dp"
+            android:singleLine="true"
+            android:textColor="@color/colorTextPrimary"
+            android:textColorHint="@color/colorTextTertiary"
+            android:textSize="16dp"
+            android:textStyle="bold" />
+
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/tvLocalAdbPortLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/local_adb_port_label"
+        android:textColor="@color/colorTextSecondary"
+        android:textSize="13dp" />
+
+    <FrameLayout
+        android:id="@+id/portContainer"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_input_field">
+
+        <EditText
+            android:id="@+id/etLocalAdbPort"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@null"
+            android:paddingHorizontal="16dp"
+            android:singleLine="true"
+            android:textColor="@color/colorTextPrimary"
+            android:textColorHint="@color/colorTextTertiary"
+            android:textSize="16dp"
+            android:textStyle="bold" />
+
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/tvLocalAdbPairingCodeLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/local_adb_pairing_code_label"
+        android:textColor="@color/colorTextSecondary"
+        android:textSize="13dp" />
+
+    <FrameLayout
+        android:id="@+id/pairingCodeContainer"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_input_field">
+
+        <EditText
+            android:id="@+id/etLocalAdbPairingCode"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@null"
+            android:paddingHorizontal="16dp"
+            android:singleLine="true"
+            android:textColor="@color/colorTextPrimary"
+            android:textColorHint="@color/colorTextTertiary"
+            android:textSize="16dp"
+            android:textStyle="bold" />
+
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/tvLocalAdbPairingHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="@string/local_adb_pairing_hint"
+        android:textColor="@color/colorTextTertiary"
+        android:textSize="12dp" />
+
+    <io.agents.bqaagent.widget.KButton
+        android:id="@+id/btnOpenWirelessDebugging"
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:layout_marginTop="20dp"
+        android:text="@string/local_adb_open_wireless_debugging"
+        android:textSize="15dp"
+        app:btnBackground="@color/colorBgPrimary"
+        app:btnBorderColor="@color/colorBorderHigh"
+        app:btnTextColor="@color/colorTextPrimary" />
+
+    <io.agents.bqaagent.widget.KButton
+        android:id="@+id/btnRefreshPorts"
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:layout_marginTop="8dp"
+        android:text="@string/local_adb_refresh_ports"
+        android:textSize="15dp"
+        app:btnBackground="@color/colorBgPrimary"
+        app:btnBorderColor="@color/colorBorderHigh"
+        app:btnTextColor="@color/colorTextPrimary" />
+
+    <io.agents.bqaagent.widget.KButton
+        android:id="@+id/btnConfirm"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:layout_marginTop="12dp"
+        android:text="@string/local_adb_setup_action"
+        android:textSize="15dp" />
+
+</LinearLayout>

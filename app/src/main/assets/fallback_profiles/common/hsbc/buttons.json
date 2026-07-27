@@ -1,0 +1,48 @@
+{
+  "profile_id": "hsbc_hk_buttons_common",
+  "app_package": "com.hsbc.hkmb.app",
+  "app_version": null,
+  "component_type": "button",
+  "description": "汇丰香港 通用按钮组件",
+  "bounds_base_resolution": [1080, 2400],
+  "components": [
+    {
+      "id": "transfer_confirm_btn",
+      "text": "確認轉賬",
+      "contentDescription": "",
+      "resourceId": "com.hsbc.hkmb.app:id/btn_confirm",
+      "className": "android.widget.Button",
+      "packageName": "com.hsbc.hkmb.app",
+      "bounds": [108, 2100, 972, 2200],
+      "clickable": true,
+      "longClickable": false,
+      "scrollable": false,
+      "checkable": false,
+      "checked": false,
+      "enabled": true,
+      "focused": false,
+      "selected": false,
+      "tags": ["确认转账", "确认", "提交转账", "confirm transfer"],
+      "activity": "ConfirmActivity"
+    },
+    {
+      "id": "common_cancel_btn",
+      "text": "取消",
+      "contentDescription": "",
+      "resourceId": "android:id/button2",
+      "className": "android.widget.Button",
+      "packageName": "com.hsbc.hkmb.app",
+      "bounds": [108, 1800, 530, 1900],
+      "clickable": true,
+      "longClickable": false,
+      "scrollable": false,
+      "checkable": false,
+      "checked": false,
+      "enabled": true,
+      "focused": false,
+      "selected": false,
+      "tags": ["cancel", "取消按钮"],
+      "activity": ""
+    }
+  ]
+}

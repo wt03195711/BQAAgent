@@ -1,0 +1,5 @@
+{
+  "api_key": "root1234",
+  "base_url": "http://10.0.2.2:22001/v1",
+  "model_name": "Qwen3.5-9B-MLX-4bit"
+}

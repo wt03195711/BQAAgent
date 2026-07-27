@@ -1,0 +1,212 @@
+<resources>
+    <string name="app_name">BQAAgent</string>
+
+    <!-- 通用 -->
+    <string name="common_confirm">确定</string>
+    <string name="common_cancel">取消</string>
+    <string name="common_close">关闭</string>
+    <string name="common_save">保存</string>
+    <string name="common_agree">同意</string>
+    <string name="common_unconfigured">未配置</string>
+    <string name="common_load_failed">加载失败: %s</string>
+
+    <string name="app_slogan">一款能做事的AI Agents</string>
+
+    <!-- 引导页 -->
+    <string name="guide_page_title">权限设置</string>
+    <string name="guide_page_subtitle">请开启以下权限，以确保应用正常运行</string>
+    <string name="guide_skip">跳过</string>
+    <string name="guide_start">开始使用</string>
+    <string name="guide_title_local_adb">本地 ADB</string>
+    <string name="guide_desc_local_adb">通过 Android 无线调试让 BQAAgent 直接使用 ADB 自动化能力。\n\n打开无线调试，点“使用配对码配对设备”，然后只输入配对码。</string>
+    <string name="guide_title_notification">任务通知</string>
+    <string name="guide_desc_notification">只在任务执行或监控开启时显示进度通知。\n\n在首页点击对应卡片即可开启。Android 13 及以上会先请求通知权限。</string>
+    <string name="guide_title_overlay">悬浮窗</string>
+    <string name="guide_desc_overlay">显示 AI 执行状态的浮动面板。\n\n1. 前往系统设置 → 应用 → BQAAgent\n2. 找到「显示在其他应用上方」\n3. 开启开关</string>
+    <string name="guide_title_battery">电池白名单</string>
+    <string name="guide_desc_battery">防止系统在后台关闭应用。\n\n在首页点击对应卡片，然后在系统弹窗中确认「允许」。(部分品牌手机需要修改为"无限制")</string>
+    <string name="guide_title_storage">文件访问</string>
+    <string name="guide_desc_storage">允许 AI 读写设备上的文件。\n\nAndroid 11 及以上：前往设置开启「所有文件访问」\nAndroid 10 及以下：在弹窗中授予权限</string>
+
+    <!-- 首页 -->
+    <string name="home_need_notification_permission">需要通知权限才能显示常驻通知</string>
+    <string name="home_enable_local_adb">打开无线调试，然后输入配对码</string>
+    <string name="home_local_adb_ready">本地 ADB 已就绪</string>
+    <string name="home_notification_enabled">已开启任务通知</string>
+    <string name="home_overlay_enabled">已开启悬浮窗权限</string>
+    <string name="home_battery_ignored">已忽略电池优化</string>
+    <string name="home_permission_enabled">已开启</string>
+    <string name="home_card_local_adb_title">输入配对码连接</string>
+    <string name="home_card_local_adb_subtitle">只需要配对码</string>
+    <string name="home_card_notification_title">任务通知</string>
+    <string name="home_card_notification_subtitle">显示运行状态</string>
+    <string name="home_card_system_window_title">系统窗口</string>
+    <string name="home_card_system_window_subtitle">悬浮窗显示操作面板</string>
+    <string name="home_card_battery_title">电池白名单</string>
+    <string name="home_card_battery_subtitle">防止后台被系统杀死</string>
+    <string name="home_card_storage_title">文件读写</string>
+    <string name="home_card_storage_subtitle">读写设备上的文件</string>
+    <string name="home_storage_enabled">已获得文件读写权限</string>
+    <string name="home_enable_storage">请允许访问所有文件</string>
+    <string name="home_cancel_task">结束当前任务</string>
+    <string name="home_cancel_task_success">已结束当前AI任务</string>
+    <string name="home_no_task_running">当前没有进行中的任务</string>
+
+    <!-- 设置 -->
+    <string name="settings_title">设置</string>
+    <string name="settings_group_channel">本地配置</string>
+    <string name="settings_group_model">模型</string>
+    <string name="settings_group_appearance">外观</string>
+    <string name="settings_theme">主题</string>
+    <string name="settings_language">语言</string>
+    <string name="settings_language_english">英文</string>
+    <string name="settings_language_chinese">中文</string>
+    <string name="settings_language_switched">语言已切换</string>
+    <string name="settings_footer_version">版本 v%1$s</string>
+    <!-- 敏感模式 -->
+    <string name="sensitive_mode_title">敏感模式</string>
+    <string name="sensitive_mode_enabled">敏感模式已开启</string>
+    <string name="sensitive_mode_disabled">敏感模式已关闭</string>
+    <string name="sensitive_mode_disable_title">关闭敏感模式？</string>
+    <string name="sensitive_mode_disable_message">关闭敏感模式将移除银行及金融类应用任务的所有安全限制。Agent 将不再拦截高风险操作、不再执行凭据保护、不再限制工具访问。请确认您已充分了解相关风险后再关闭。</string>
+    <string name="sensitive_mode_disable_confirm">关闭</string>
+
+    <string name="local_adb_setup_title">本地 ADB 设置</string>
+    <string name="local_adb_setup_hint">127.0.0.1:连接端口 配对端口 配对码</string>
+    <string name="local_adb_setup_action">配对 / 连接</string>
+    <string name="local_adb_setup_invalid">请输入有效端口</string>
+    <string name="local_adb_setup_success">本地 ADB 已连接</string>
+    <string name="local_adb_setup_failed">本地 ADB 设置失败</string>
+    <string name="local_adb_pairing_required">需要先完成一次无线调试配对</string>
+    <string name="local_adb_reconnecting_saved_pair">正在使用已保存的配对连接...</string>
+    <string name="local_adb_reconnect_failed_pair_again">未能连接已保存的配对，已打开通知栏配对</string>
+    <string name="local_adb_detecting">正在检测无线调试端口...</string>
+    <string name="local_adb_ip_label">IP</string>
+    <string name="local_adb_port_label">配对端口</string>
+    <string name="local_adb_pairing_code_label">配对码</string>
+    <string name="local_adb_pairing_hint">只输入配对码，BQAAgent 会自动检测端口。</string>
+    <string name="local_adb_open_wireless_debugging">打开无线调试</string>
+    <string name="local_adb_connect_port_missing">可能已配对成功，但未检测到连接端口。请回到无线调试页面保持开启，然后重新输入配对码</string>
+    <string name="local_adb_pair_port_missing">未检测到配对端口。请保持系统配对码弹窗打开，然后再次输入 6 位配对码</string>
+    <string name="local_adb_refresh_ports">刷新端口</string>
+    <string name="local_adb_ports_refreshed">端口已刷新</string>
+    <string name="local_adb_ports_not_found">未检测到新端口，请保持配对码页面打开后重试</string>
+    <string name="local_adb_notification_channel_name">本地 ADB 配对</string>
+    <string name="local_adb_notification_channel_description">在系统隐藏悬浮窗时完成无线调试配对</string>
+    <string name="local_adb_notification_title">本地 ADB 配对</string>
+    <string name="local_adb_notification_text">只输入配对码，BQAAgent 会自动连接。</string>
+    <string name="local_adb_notification_input_label">配对码</string>
+    <string name="local_adb_notification_pair_action">输入配对码</string>
+    <string name="local_adb_notification_open_settings">打开无线调试</string>
+    <string name="local_adb_notification_ready">已打开无线调试，请在通知里输入配对码</string>
+    <string name="local_adb_notification_permission_required">本地 ADB 配对需要通知权限，请允许通知后重试</string>
+    <string name="local_adb_notification_pairing">正在检测端口、配对并连接...</string>
+    <string name="local_adb_notification_invalid_input">请只输入 6 位配对码</string>
+    <string name="local_adb_notification_success_text">已配对并连接，可以返回 BQAAgent 继续测试</string>
+
+    <!-- LLM 配置 -->
+    <string name="llm_config_title">LLM 配置</string>
+    <string name="llm_config_tip">请填写你的 LLM API Key、Base URL 和模型名称，数据仅保存在本地。</string>
+    <string name="llm_config_api_key">API Key</string>
+    <string name="llm_config_api_key_hint">如 sk-xxx（DeepSeek）或其它服务商的 Key</string>
+    <string name="llm_config_base_url">Base URL</string>
+    <string name="llm_config_base_url_hint">如 https://api.deepseek.com（留空则使用 DeepSeek 默认）</string>
+    <string name="llm_config_model_name">模型名称</string>
+    <string name="llm_config_model_name_hint">如 deepseek-v4-flash、deepseek-v4-pro</string>
+    <string name="llm_config_saved">LLM 配置已保存</string>
+    <string name="llm_config_api_key_required">请填写 API Key</string>
+    <string name="menu_llm_config">LLM 配置</string>
+
+    <!-- 设置菜单项 -->
+    <string name="menu_lan_config">局域网配置</string>
+    <string name="lan_config_stopped">已关闭</string>
+    <string name="lan_config_no_wifi">请先连接 WiFi</string>
+
+    <!-- 协议弹窗 -->
+    <string name="protocol_agree_title">个人信息保护指引</string>
+    <string name="protocol_alert_title">服务协议和隐私保护</string>
+    <string name="protocol_disagree">不同意</string>
+    <string name="protocol_agree_continue">同意并继续</string>
+
+    <!-- 悬浮窗 -->
+    <string name="floating_ai_label">AI</string>
+    <string name="floating_task_received">已收到：\"%s\"</string>
+
+    <!-- 前台服务通知 -->
+    <string name="notification_channel_name">BQAAgent 运行状态</string>
+    <string name="notification_channel_description">显示 BQAAgent 运行状态及统计数据</string>
+    <string name="notification_content_title">BQAAgent · 正在执行任务</string>
+    <string name="notification_content_text">任务执行中...</string>
+
+    <!-- 通道消息（发给用户的回复） -->
+    <string name="channel_msg_task_cancelled">任务已手动取消</string>
+    <string name="channel_msg_service_not_ready">服务未就绪，请稍后重试</string>
+    <string name="channel_msg_tool_success">成功</string>
+    <string name="channel_msg_tool_failure">失败</string>
+    <string name="channel_msg_tool_execution">[%1$s]：%2$s</string>
+    <string name="channel_msg_task_error">遇到了错误：%s</string>
+    <string name="channel_msg_no_local_adb">本地 ADB 未连接，无法执行任务</string>
+    <string name="channel_msg_task_in_progress">有任务执行中，请稍候</string>
+    <string name="channel_msg_system_dialog_blocked">可能有系统弹窗遮挡了屏幕，请检查并手动处理后重试</string>
+
+    <!-- 本地 ADB 自动化 -->
+    <string name="cd_back_button">返回</string>
+    <string name="cd_settings">设置</string>
+    <string name="cd_clear_input">清除输入</string>
+    <string name="cd_checkbox">切换选中状态</string>
+    <string name="cd_selected">已选中</string>
+    <string name="cd_task_success">任务完成</string>
+    <string name="cd_task_error">任务失败</string>
+    <string name="cd_channel_logo">渠道图标</string>
+    <string name="cd_empty_state">暂无数据</string>
+    <string name="cd_error_state">加载失败</string>
+
+    <!-- Agent 服务 -->
+    <string name="agent_local_adb_not_ready">本地 ADB 未就绪，无法执行任务</string>
+    <string name="agent_task_cancelled">任务已取消</string>
+    <string name="agent_task_completed">任务完成</string>
+    <string name="agent_task_cancel">任务取消</string>
+    <string name="agent_api_call_failed">AI 服务调用失败: %s</string>
+    <string name="agent_max_iterations">在未完成任务的情况下达到了最大迭代次数 (%d)</string>
+
+    <!-- 文件工具 -->
+    <string name="tool_no_storage_permission">没有读写文件的权限</string>
+    <string name="tool_file_not_found">文件不存在: %s</string>
+    <string name="tool_not_a_file">路径不是文件: %s</string>
+    <string name="tool_no_task_channel">当前没有进行中的任务通道</string>
+    <string name="tool_file_sent">文件已发送: %s</string>
+    <string name="tool_file_send_failed">文件发送失败: %s</string>
+
+    <!-- 工具名称 -->
+    <string name="tool_name_screenshot">截屏</string>
+    <string name="tool_name_send_file">发送文件</string>
+    <string name="tool_name_wait">等待</string>
+    <string name="tool_name_get_screen_info">获取屏幕信息</string>
+    <string name="tool_name_finish">完成任务</string>
+    <string name="tool_name_open_app">打开应用</string>
+    <string name="tool_name_get_installed_apps">获取应用列表</string>
+    <string name="tool_name_system_key">系统按键</string>
+    <string name="tool_name_tap">点击</string>
+    <string name="tool_name_swipe">滑动</string>
+    <string name="tool_name_input_text">输入文本</string>
+    <string name="tool_name_find_node_info">查找节点</string>
+    <string name="tool_name_long_press">长按</string>
+    <string name="tool_name_repeat_actions">重复执行动作</string>
+    <string name="tool_name_volume_up">音量+</string>
+    <string name="tool_name_volume_down">音量-</string>
+    <string name="tool_name_dpad_up">方向上</string>
+    <string name="tool_name_dpad_down">方向下</string>
+    <string name="tool_name_dpad_left">方向左</string>
+    <string name="tool_name_dpad_right">方向右</string>
+    <string name="tool_name_dpad_center">方向中心</string>
+    <string name="tool_name_press_menu">菜单</string>
+    <string name="tool_name_press_power">电源</string>
+    <string name="tool_name_search_app">搜索APP</string>
+    <string name="tool_name_clipboard">剪贴板</string>
+    <string name="tool_name_scroll_to_find">滚动查找</string>
+
+    <!-- 输入弹窗 -->
+    <string name="input_dialog_need_more">至少输入%d个字符</string>
+    <string name="input_dialog_need_less">最多输入%d个字符</string>
+    <string name="input_dialog_no_zero">请输入非零数值</string>
+</resources>

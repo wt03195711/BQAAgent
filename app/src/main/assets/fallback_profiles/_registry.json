@@ -1,0 +1,23 @@
+{
+  "profiles": [
+    {
+      "app_package": "com.hsbc.hkmb.app",
+      "app_version": null,
+      "device_model": null,
+      "files": [
+        "common/hsbc/buttons.json",
+        "common/hsbc/inputs.json",
+        "common/hsbc/tabs.json",
+        "common/hsbc/dialogs.json"
+      ]
+    },
+    {
+      "app_package": "com.hsbc.hkmb.app",
+      "app_version": "5.2.0",
+      "device_model": null,
+      "files": [
+        "versions/hsbc/5.2.0/buttons.json"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,212 @@
+<resources>
+    <string name="app_name">BQAAgent</string>
+
+    <!-- Common -->
+    <string name="common_confirm">OK</string>
+    <string name="common_cancel">Cancel</string>
+    <string name="common_close">Close</string>
+    <string name="common_save">Save</string>
+    <string name="common_agree">Agree</string>
+    <string name="common_unconfigured">Not configured</string>
+    <string name="common_load_failed">Failed to load: %s</string>
+
+    <string name="app_slogan">AI Agents that get things done</string>
+
+    <!-- Guide -->
+    <string name="guide_page_title">Permission Setup</string>
+    <string name="guide_page_subtitle">Please enable the following permissions for the app to work properly</string>
+    <string name="guide_skip">Skip</string>
+    <string name="guide_start">Get Started</string>
+    <string name="guide_title_local_adb">Local ADB</string>
+    <string name="guide_desc_local_adb">Use Android Wireless debugging directly. Open Wireless debugging, tap Pair device with pairing code, then enter the pairing code.</string>
+    <string name="guide_title_notification">Task Notifications</string>
+    <string name="guide_desc_notification">Lets BQAAgent show progress while a task or monitor is active. Tap to enable.</string>
+    <string name="guide_title_overlay">System Overlay</string>
+    <string name="guide_desc_overlay">Shows a floating status panel while tasks run. Tap to enable.</string>
+    <string name="guide_title_battery">Battery Whitelist</string>
+    <string name="guide_desc_battery">Prevents the system from killing BQAAgent. Tap to allow.</string>
+    <string name="guide_title_storage">File Access</string>
+    <string name="guide_desc_storage">Lets BQAAgent read and write files on your device. Tap to enable.</string>
+
+    <!-- Home -->
+    <string name="home_need_notification_permission">Notification permission is required</string>
+    <string name="home_enable_local_adb">Open Wireless debugging, then enter the pairing code</string>
+    <string name="home_local_adb_ready">Local ADB is ready</string>
+    <string name="home_notification_enabled">Task notifications enabled</string>
+    <string name="home_overlay_enabled">Overlay permission enabled</string>
+    <string name="home_battery_ignored">Battery optimization ignored</string>
+    <string name="home_permission_enabled">Enabled</string>
+    <string name="home_card_local_adb_title">Pair with Pairing Code</string>
+    <string name="home_card_local_adb_subtitle">Only the pairing code is needed</string>
+    <string name="home_card_notification_title">Task Notifications</string>
+    <string name="home_card_notification_subtitle">Only while tasks or monitoring are active</string>
+    <string name="home_card_system_window_title">System Window</string>
+    <string name="home_card_system_window_subtitle">Floating panel overlay</string>
+    <string name="home_card_battery_title">Battery Whitelist</string>
+    <string name="home_card_battery_subtitle">Prevent background termination</string>
+    <string name="home_card_storage_title">File Access</string>
+    <string name="home_card_storage_subtitle">Read and write device files</string>
+    <string name="home_storage_enabled">File access permission granted</string>
+    <string name="home_enable_storage">Please allow access to all files</string>
+    <string name="home_cancel_task">Stop current task</string>
+    <string name="home_cancel_task_success">AI task stopped</string>
+    <string name="home_no_task_running">No task is running</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_group_channel">Local Config</string>
+    <string name="settings_group_model">Model</string>
+    <string name="settings_group_appearance">Appearance</string>
+    <string name="settings_theme">Theme</string>
+    <string name="settings_language">Language</string>
+    <string name="settings_language_english">English</string>
+    <string name="settings_language_chinese">Chinese</string>
+    <string name="settings_language_switched">Language changed</string>
+    <string name="settings_footer_version">Version v%1$s</string>
+    <!-- Sensitive Mode -->
+    <string name="sensitive_mode_title">Sensitive Mode</string>
+    <string name="sensitive_mode_enabled">Sensitive mode enabled</string>
+    <string name="sensitive_mode_disabled">Sensitive mode disabled</string>
+    <string name="sensitive_mode_disable_title">Disable Sensitive Mode?</string>
+    <string name="sensitive_mode_disable_message">Disabling sensitive mode removes all safety restrictions for banking and financial app tasks. The agent will no longer block risky operations, enforce credential guards, or limit tool access. Only disable this if you fully understand the risks.</string>
+    <string name="sensitive_mode_disable_confirm">Disable</string>
+
+    <string name="local_adb_setup_title">Local ADB setup</string>
+    <string name="local_adb_setup_hint">127.0.0.1:connectPort pairPort pairCode</string>
+    <string name="local_adb_setup_action">Pair / Connect</string>
+    <string name="local_adb_setup_invalid">Enter a valid port</string>
+    <string name="local_adb_setup_success">Local ADB connected</string>
+    <string name="local_adb_setup_failed">Local ADB setup failed</string>
+    <string name="local_adb_pairing_required">Pair Wireless debugging once first</string>
+    <string name="local_adb_reconnecting_saved_pair">Connecting with saved pairing...</string>
+    <string name="local_adb_reconnect_failed_pair_again">Saved pairing could not connect. Notification pairing is open.</string>
+    <string name="local_adb_detecting">Detecting Wireless debugging ports...</string>
+    <string name="local_adb_ip_label">IP</string>
+    <string name="local_adb_port_label">Pairing port</string>
+    <string name="local_adb_pairing_code_label">Pairing code</string>
+    <string name="local_adb_pairing_hint">Enter the pairing code only. BQAAgent detects the port automatically.</string>
+    <string name="local_adb_open_wireless_debugging">Open Wireless debugging</string>
+    <string name="local_adb_connect_port_missing">Pairing may have succeeded, but the connect port was not detected. Return to Wireless debugging, keep it enabled, then enter the code again.</string>
+    <string name="local_adb_pair_port_missing">Could not detect the pairing port. Keep the pairing-code dialog open, then enter the 6-digit code again.</string>
+    <string name="local_adb_refresh_ports">Refresh port</string>
+    <string name="local_adb_ports_refreshed">Port refreshed</string>
+    <string name="local_adb_ports_not_found">No new port detected. Keep the pairing-code screen open and try again.</string>
+    <string name="local_adb_notification_channel_name">Local ADB pairing</string>
+    <string name="local_adb_notification_channel_description">Finish Wireless debugging pairing when system pages hide overlays</string>
+    <string name="local_adb_notification_title">Local ADB pairing</string>
+    <string name="local_adb_notification_text">Enter the pairing code only. BQAAgent connects automatically.</string>
+    <string name="local_adb_notification_input_label">Pairing code</string>
+    <string name="local_adb_notification_pair_action">Pair with code</string>
+    <string name="local_adb_notification_open_settings">Open Wireless debugging</string>
+    <string name="local_adb_notification_ready">Wireless debugging is open. Enter the pairing code from the notification.</string>
+    <string name="local_adb_notification_permission_required">Notification permission is required for Local ADB pairing. Allow notifications, then try again.</string>
+    <string name="local_adb_notification_pairing">Detecting port, pairing, and connecting...</string>
+    <string name="local_adb_notification_invalid_input">Enter the 6-digit pairing code only.</string>
+    <string name="local_adb_notification_success_text">Paired and connected. Return to BQAAgent to continue testing.</string>
+
+    <!-- LLM Config -->
+    <string name="llm_config_title">LLM Configuration</string>
+    <string name="llm_config_tip">Enter your LLM API key, base URL and model name. Data is stored locally only.</string>
+    <string name="llm_config_api_key">API Key</string>
+    <string name="llm_config_api_key_hint">e.g. sk-xxx (DeepSeek) or your provider key</string>
+    <string name="llm_config_base_url">Base URL</string>
+    <string name="llm_config_base_url_hint">e.g. https://api.deepseek.com (leave empty for DeepSeek default)</string>
+    <string name="llm_config_model_name">Model Name</string>
+    <string name="llm_config_model_name_hint">e.g. deepseek-v4-flash, deepseek-v4-pro</string>
+    <string name="llm_config_saved">LLM configuration saved</string>
+    <string name="llm_config_api_key_required">Please enter API Key</string>
+    <string name="menu_llm_config">LLM Config</string>
+
+    <!-- Settings Menu -->
+    <string name="menu_lan_config">LAN Config</string>
+    <string name="lan_config_stopped">Off</string>
+    <string name="lan_config_no_wifi">Please connect to WiFi first</string>
+
+    <!-- Protocol -->
+    <string name="protocol_agree_title">Privacy Guidelines</string>
+    <string name="protocol_alert_title">Terms and Privacy</string>
+    <string name="protocol_disagree">Disagree</string>
+    <string name="protocol_agree_continue">Agree and Continue</string>
+
+    <!-- Floating -->
+    <string name="floating_ai_label">AI</string>
+    <string name="floating_task_received">Received: \"%s\"</string>
+
+    <!-- Foreground Service Notification -->
+    <string name="notification_channel_name">BQAAgent Status</string>
+    <string name="notification_channel_description">Shows BQAAgent running status and stats</string>
+    <string name="notification_content_title">BQAAgent · Task in progress</string>
+    <string name="notification_content_text">Running task...</string>
+
+    <!-- Channel Messages -->
+    <string name="channel_msg_task_cancelled">Task cancelled manually</string>
+    <string name="channel_msg_service_not_ready">Service not ready, please try again later</string>
+    <string name="channel_msg_tool_success">Success</string>
+    <string name="channel_msg_tool_failure">Failed</string>
+    <string name="channel_msg_tool_execution">[%1$s]: %2$s</string>
+    <string name="channel_msg_task_error">Error: %s</string>
+    <string name="channel_msg_no_local_adb">Local ADB is not connected, cannot execute task</string>
+    <string name="channel_msg_task_in_progress">A task is already running, please wait</string>
+    <string name="channel_msg_system_dialog_blocked">A system dialog may be blocking the screen. Please check and handle it manually, then try again.</string>
+
+    <!-- Local ADB automation -->
+    <string name="cd_back_button">Back</string>
+    <string name="cd_settings">Settings</string>
+    <string name="cd_clear_input">Clear input</string>
+    <string name="cd_checkbox">Toggle checkbox</string>
+    <string name="cd_selected">Selected</string>
+    <string name="cd_task_success">Task completed</string>
+    <string name="cd_task_error">Task failed</string>
+    <string name="cd_channel_logo">Channel logo</string>
+    <string name="cd_empty_state">No data</string>
+    <string name="cd_error_state">Load failed</string>
+
+    <!-- Agent -->
+    <string name="agent_local_adb_not_ready">Local ADB is not ready</string>
+    <string name="agent_task_cancelled">Task cancelled</string>
+    <string name="agent_task_completed">Task completed</string>
+    <string name="agent_task_cancel">Task cancelled</string>
+    <string name="agent_api_call_failed">AI service call failed: %s</string>
+    <string name="agent_max_iterations">Reached maximum iterations (%d) without completing the task</string>
+
+    <!-- File Tool -->
+    <string name="tool_no_storage_permission">No file read/write permission</string>
+    <string name="tool_file_not_found">File not found: %s</string>
+    <string name="tool_not_a_file">Path is not a file: %s</string>
+    <string name="tool_no_task_channel">No active task channel</string>
+    <string name="tool_file_sent">File sent: %s</string>
+    <string name="tool_file_send_failed">Failed to send file: %s</string>
+
+    <!-- Tool Names -->
+    <string name="tool_name_screenshot">Screenshot</string>
+    <string name="tool_name_send_file">Send File</string>
+    <string name="tool_name_wait">Wait</string>
+    <string name="tool_name_get_screen_info">Get Screen Info</string>
+    <string name="tool_name_finish">Finish Task</string>
+    <string name="tool_name_open_app">Open App</string>
+    <string name="tool_name_get_installed_apps">Get Installed Apps</string>
+    <string name="tool_name_system_key">System Key</string>
+    <string name="tool_name_tap">Tap</string>
+    <string name="tool_name_swipe">Swipe</string>
+    <string name="tool_name_input_text">Input Text</string>
+    <string name="tool_name_find_node_info">Find Node</string>
+    <string name="tool_name_long_press">Long Press</string>
+    <string name="tool_name_repeat_actions">Repeat Actions</string>
+    <string name="tool_name_volume_up">Volume Up</string>
+    <string name="tool_name_volume_down">Volume Down</string>
+    <string name="tool_name_dpad_up">D-pad Up</string>
+    <string name="tool_name_dpad_down">D-pad Down</string>
+    <string name="tool_name_dpad_left">D-pad Left</string>
+    <string name="tool_name_dpad_right">D-pad Right</string>
+    <string name="tool_name_dpad_center">D-pad Center</string>
+    <string name="tool_name_press_menu">Menu</string>
+    <string name="tool_name_press_power">Power</string>
+    <string name="tool_name_search_app">Search App</string>
+    <string name="tool_name_clipboard">Clipboard</string>
+    <string name="tool_name_scroll_to_find">Scroll to Find</string>
+
+    <!-- Input Dialog -->
+    <string name="input_dialog_need_more">Enter at least %d characters</string>
+    <string name="input_dialog_need_less">Enter at most %d characters</string>
+    <string name="input_dialog_no_zero">Please enter a non-zero value</string>
+</resources>

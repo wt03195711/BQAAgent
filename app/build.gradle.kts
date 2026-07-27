@@ -1,0 +1,252 @@
+import org.jetbrains.kotlin.konan.properties.hasProperty
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Properties
+
+plugins {
+    alias(libs.plugins.android.application)
+    id("org.jetbrains.kotlin.plugin.compose") version "2.2.10"
+}
+
+fun readLocalOrEnvString(key: String, defaultValue: String = ""): String {
+    val props = Properties().apply {
+        File("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+    }
+    return System.getenv(key)?.takeIf { it.isNotBlank() }
+        ?: props.getProperty(key, defaultValue).trim()
+}
+
+fun readLocalOrEnvInt(key: String, defaultValue: Int): Int {
+    return readLocalOrEnvString(key).toIntOrNull() ?: defaultValue
+}
+
+android {
+    namespace = "io.agents.bqaagent"
+    compileSdk {
+        version = release(36) {
+            minorApiLevel = 1
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            val props = Properties().apply {
+                rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+            }
+            fun readSigningValue(key: String): String {
+                return System.getenv(key)?.takeIf { it.isNotBlank() }
+                    ?: props.getProperty(key, "").trim()
+            }
+            val keystorePath = readSigningValue("KEYSTORE_FILE")
+            if (keystorePath.isNotEmpty()) {
+                storeFile = file(keystorePath)
+                storePassword = readSigningValue("KEYSTORE_PASSWORD")
+                keyAlias = readSigningValue("KEY_ALIAS")
+                keyPassword = readSigningValue("KEY_PASSWORD")
+            }
+        }
+    }
+
+    defaultConfig {
+        applicationId = "io.agents.bqaagent"
+        minSdk = 28
+        targetSdk = 36
+        versionCode = readLocalOrEnvInt("BQAAGENT_VERSION_CODE", 1)
+        versionName = readLocalOrEnvString("BQAAGENT_VERSION_NAME", "0.0.1")
+        buildConfigField("String", "VERSION_INFO", getVersionGit())
+        buildConfigField("String", "APP_ORIGIN", "\"BQAAgent by agents.io | github.com/agents-io/BQAAgent\"")
+        buildConfigField("String", "BUILD_FINGERPRINT", "\"${getBuildFingerprint()}\"")
+    }
+
+
+    buildTypes {
+        getByName("debug") {
+            isMinifyEnabled = false
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+
+        release {
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        aidl = true
+        buildConfig = true
+        compose = true
+    }
+
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+            )
+        }
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+}
+
+dependencies {
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.appcompat)
+    implementation(libs.material)
+    implementation(libs.constraintlayout)
+    implementation(libs.gson)
+
+
+    // LangChain4j (exclude JDK http-client, use OkHttp adapter for Android)
+    implementation(libs.langchain4j.core)
+    implementation(libs.langchain4j.openai) {
+        exclude(group = "dev.langchain4j", module = "langchain4j-http-client-jdk")
+    }
+    implementation(libs.langchain4j.anthropic) {
+        exclude(group = "dev.langchain4j", module = "langchain4j-http-client-jdk")
+    }
+    implementation(libs.okhttp)
+    implementation(libs.okhttp.logging)
+    implementation(libs.utilcode)
+    implementation(libs.ok2curl)
+    implementation(libs.lifecycle.runtime)
+    implementation(libs.lifecycle.viewmodel)
+    implementation(libs.mmkv)
+    implementation(libs.adapter)
+    implementation(libs.glide)
+    implementation(libs.glide.transformations)
+    implementation(libs.easyfloat)
+
+
+    // Jetpack Compose
+    implementation(platform("androidx.compose:compose-bom:2025.05.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // LiteRT-LM on-device LLM inference (Google AI Edge)
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.10.0")
+
+    // NanoHTTPD 嵌入式 HTTP 服务器（局域网配置服务）
+    implementation(libs.nanohttpd)
+    implementation(libs.kadb)
+    implementation(libs.kotlinx.coroutines.android)
+}
+
+tasks.register("injectBuildFingerprint") {
+    doLast {
+        val gitHash = try {
+            val p = Runtime.getRuntime().exec("git rev-parse HEAD")
+            val r = BufferedReader(InputStreamReader(p.inputStream))
+            r.readLine()?.trim() ?: "unknown"
+        } catch (_: Exception) { "unknown" }
+        val ts = System.currentTimeMillis()
+        val builder = System.getenv("BUILDER_ID") ?: System.getProperty("user.name") ?: "local"
+        val fp = "t=$ts\nc=$gitHash\nb=$builder\nv=${android.defaultConfig.versionName}"
+        val hexEncoded = fp.toByteArray().joinToString("") { "%02x".format(it) }
+        file("src/main/assets/.pcfp").apply {
+            parentFile.mkdirs()
+            writeText(hexEncoded)
+        }
+    }
+}
+tasks.named("preBuild") { dependsOn("injectBuildFingerprint") }
+
+androidComponents {
+    onVariants { variant ->
+        variant.outputs.forEach { output ->
+            if (output is com.android.build.api.variant.impl.VariantOutputImpl) {
+                val versionName = android.defaultConfig.versionName ?: "0.0.0"
+                val fileName = "BQAAgent_v${versionName}_${getDateTime()}.apk"
+                println("output file name: $fileName")
+                output.outputFileName.set(fileName)
+            }
+        }
+    }
+}
+
+fun getVersionGit(): String {
+    val process1 = Runtime.getRuntime().exec("git rev-parse --abbrev-ref HEAD")
+    val reader1 = BufferedReader(InputStreamReader(process1.inputStream))
+    val branch = reader1.readLine()?.trim()
+    reader1.close()
+
+    val process2 = Runtime.getRuntime().exec("git rev-parse HEAD")
+    val reader2 = BufferedReader(InputStreamReader(process2.inputStream))
+    val sha1 = reader2.readLine()?.trim()
+    reader2.close()
+    // 将数据拼接起来，如果只需要SHA-1 那么就可以不执行process1命令
+    return "\"" + branch + "_" + sha1 + "\""
+}
+
+fun getBuildFingerprint(): String {
+    val gitHash = try {
+        val p = Runtime.getRuntime().exec("git rev-parse --short HEAD")
+        val r = BufferedReader(InputStreamReader(p.inputStream))
+        r.readLine()?.trim() ?: "unknown"
+    } catch (_: Exception) { "unknown" }
+    val ts = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
+    val builder = System.getenv("BUILDER_ID") ?: System.getProperty("user.name") ?: "local"
+    return "$gitHash|$ts|$builder"
+}
+
+fun getDateTime(): String {
+    val df = SimpleDateFormat("yyyyMMdd_HHmmss");
+    return df.format(Date());
+}
+
+fun getParameter(key: String, defaultValue: String): String {
+    var value = defaultValue
+    val hasProperty = project.hasProperty(key)
+    if (hasProperty) {
+        val property = project.properties[key] as String?
+        if (!property.isNullOrEmpty()) {
+            value = property
+            println("get property[$key]from project:$value")
+            return value
+        }
+    }
+    val localPropertiesFile = project.rootProject.file("local.properties")
+    val localProperties = Properties()
+    if (localPropertiesFile.exists()) {
+        localProperties.load(localPropertiesFile.inputStream())
+        val hasLocalProperty = localProperties.hasProperty(key)
+        if (hasLocalProperty) {
+            val property = localProperties[key] as String?
+            if (!property.isNullOrEmpty()) {
+                value = property
+                println("get property[$key]from local:$value")
+                return value
+            }
+        }
+    }
+    println("get property[$key] from default:$value")
+    return value
+}

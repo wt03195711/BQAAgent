@@ -1,0 +1,48 @@
+{
+  "profile_id": "hsbc_hk_dialogs_common",
+  "app_package": "com.hsbc.hkmb.app",
+  "app_version": null,
+  "component_type": "dialog",
+  "description": "汇丰香港 通用弹窗组件",
+  "bounds_base_resolution": [1080, 2400],
+  "components": [
+    {
+      "id": "dialog_allow_btn",
+      "text": "允許",
+      "contentDescription": "Allow",
+      "resourceId": "android:id/button1",
+      "className": "android.widget.Button",
+      "packageName": "com.hsbc.hkmb.app",
+      "bounds": [720, 1500, 1008, 1600],
+      "clickable": true,
+      "longClickable": false,
+      "scrollable": false,
+      "checkable": false,
+      "checked": false,
+      "enabled": true,
+      "focused": false,
+      "selected": false,
+      "tags": ["允许", "允許", "allow", "同意", "agree"],
+      "activity": ""
+    },
+    {
+      "id": "dialog_deny_btn",
+      "text": "拒絕",
+      "contentDescription": "Deny",
+      "resourceId": "android:id/button2",
+      "className": "android.widget.Button",
+      "packageName": "com.hsbc.hkmb.app",
+      "bounds": [72, 1500, 360, 1600],
+      "clickable": true,
+      "longClickable": false,
+      "scrollable": false,
+      "checkable": false,
+      "checked": false,
+      "enabled": true,
+      "focused": false,
+      "selected": false,
+      "tags": ["拒绝", "拒絕", "deny", "取消", "cancel"],
+      "activity": ""
+    }
+  ]
+}

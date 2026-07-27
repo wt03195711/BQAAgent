@@ -1,0 +1,176 @@
+<resources>
+    <string name="app_name">BQAAgent</string>
+
+    <!-- 共通 -->
+    <string name="common_confirm">OK</string>
+    <string name="common_cancel">キャンセル</string>
+    <string name="common_close">閉じる</string>
+    <string name="common_save">保存</string>
+    <string name="common_agree">同意</string>
+    <string name="common_unconfigured">未設定</string>
+    <string name="common_load_failed">読み込み失敗: %s</string>
+
+    <string name="app_slogan">タスクをこなすAI Agents</string>
+
+    <!-- ガイド -->
+    <string name="guide_page_title">権限の設定</string>
+    <string name="guide_page_subtitle">アプリを正常に動作させるため、以下の権限を有効にしてください</string>
+    <string name="guide_skip">スキップ</string>
+    <string name="guide_start">はじめる</string>
+    <string name="guide_title_local_adb">Local ADB</string>
+    <string name="guide_desc_local_adb">Android のワイヤレスデバッグを使い、BQAAgent が直接 ADB 自動操作を行います。\n\n1. 開発者向けオプション → ワイヤレスデバッグを開く\n2. ペアリングコードでペア設定する\n3. BQAAgent に接続ポート、ペアリングポート、コードを入力する</string>
+    <string name="guide_title_notification">タスク通知</string>
+    <string name="guide_desc_notification">タスクや監視が動作中のときだけ進行状況を表示します。\n\nホーム画面のカードをタップして有効にしてください。Android 13以降は通知権限が先に求められます。</string>
+    <string name="guide_title_overlay">システムオーバーレイ</string>
+    <string name="guide_desc_overlay">AI実行状態を表示するフローティングパネルです。\n\n1. 設定 → アプリ → BQAAgentを開く\n2.「他のアプリの上に重ねて表示」を見つける\n3. スイッチをオンにする</string>
+    <string name="guide_title_battery">バッテリーホワイトリスト</string>
+    <string name="guide_desc_battery">システムがバックグラウンドでアプリを停止するのを防ぎます。\n\nホーム画面のカードをタップし、システムダイアログで「許可」を確認してください。(一部の端末では「制限なし」に変更が必要です)</string>
+    <string name="guide_title_storage">ファイルアクセス</string>
+    <string name="guide_desc_storage">AIがデバイス上のファイルを読み書きできるようにします。\n\nAndroid 11以降: 設定で「すべてのファイルへのアクセス」を有効にする\nAndroid 10以前: ポップアップで権限を許可する</string>
+
+    <!-- ホーム -->
+    <string name="home_need_notification_permission">通知権限が必要です</string>
+    <string name="home_enable_local_adb">ワイヤレスデバッグを有効にし、BQAAgent で Local ADB をペア設定してください</string>
+    <string name="home_local_adb_ready">Local ADB は準備完了です</string>
+    <string name="home_notification_enabled">タスク通知が有効です</string>
+    <string name="home_overlay_enabled">オーバーレイ権限が有効です</string>
+    <string name="home_battery_ignored">バッテリー最適化を無効化済み</string>
+    <string name="home_permission_enabled">有効</string>
+    <string name="home_card_local_adb_title">ワイヤレス接続をペア設定</string>
+    <string name="home_card_local_adb_subtitle">ワイヤレスデバッグ自動操作</string>
+    <string name="home_card_notification_title">タスク通知</string>
+    <string name="home_card_notification_subtitle">実行状態を表示</string>
+    <string name="home_card_system_window_title">システムウィンドウ</string>
+    <string name="home_card_system_window_subtitle">フローティングパネルを表示</string>
+    <string name="home_card_battery_title">バッテリーホワイトリスト</string>
+    <string name="home_card_battery_subtitle">バックグラウンドでの強制終了を防止</string>
+    <string name="home_card_storage_title">ファイルアクセス</string>
+    <string name="home_card_storage_subtitle">デバイスのファイルを読み書き</string>
+    <string name="home_storage_enabled">ファイルアクセス権限を取得済み</string>
+    <string name="home_enable_storage">すべてのファイルへのアクセスを許可してください</string>
+    <string name="home_cancel_task">現在のタスクを停止</string>
+    <string name="home_cancel_task_success">AIタスクを停止しました</string>
+    <string name="home_no_task_running">実行中のタスクはありません</string>
+
+    <!-- 設定 -->
+    <string name="settings_title">設定</string>
+    <string name="settings_group_channel">ローカル設定</string>
+    <string name="settings_group_model">モデル</string>
+    <!-- センシティブモード -->
+    <string name="sensitive_mode_title">センシティブモード</string>
+    <string name="sensitive_mode_enabled">センシティブモードを有効にしました</string>
+    <string name="sensitive_mode_disabled">センシティブモードを無効にしました</string>
+    <string name="sensitive_mode_disable_title">センシティブモードを無効にしますか？</string>
+    <string name="sensitive_mode_disable_message">センシティブモードを無効にすると、銀行・金融アプリのタスクに対するすべての安全制限が解除されます。エージェントは危険な操作のブロック、認証情報の保護、ツールアクセスの制限を行わなくなります。リスクを十分に理解している場合のみ無効にしてください。</string>
+    <string name="sensitive_mode_disable_confirm">無効にする</string>
+
+    <!-- LLM設定 -->
+    <string name="llm_config_title">LLM設定</string>
+    <string name="llm_config_tip">LLM API Key、Base URL、モデル名を入力してください。データはローカルにのみ保存されます。</string>
+    <string name="llm_config_api_key">API Key</string>
+    <string name="llm_config_api_key_hint">例: sk-xxx（DeepSeek）またはプロバイダーのKey</string>
+    <string name="llm_config_base_url">Base URL</string>
+    <string name="llm_config_base_url_hint">例: https://api.deepseek.com（空欄の場合はDeepSeekデフォルト）</string>
+    <string name="llm_config_model_name">モデル名</string>
+    <string name="llm_config_model_name_hint">例: deepseek-v4-flash、deepseek-v4-pro</string>
+    <string name="llm_config_saved">LLM設定を保存しました</string>
+    <string name="llm_config_api_key_required">API Keyを入力してください</string>
+    <string name="menu_llm_config">LLM設定</string>
+
+    <!-- 設定メニュー -->
+    <string name="menu_lan_config">LAN設定</string>
+    <string name="lan_config_stopped">オフ</string>
+    <string name="lan_config_no_wifi">WiFiに接続してください</string>
+
+    <!-- プロトコル -->
+    <string name="protocol_agree_title">個人情報保護について</string>
+    <string name="protocol_alert_title">利用規約とプライバシー</string>
+    <string name="protocol_disagree">同意しない</string>
+    <string name="protocol_agree_continue">同意して続行</string>
+
+    <!-- フローティング -->
+    <string name="floating_ai_label">AI</string>
+    <string name="floating_task_received">受信：\"%s\"</string>
+
+    <!-- フォアグラウンドサービス通知 -->
+    <string name="notification_channel_name">BQAAgent ステータス</string>
+    <string name="notification_channel_description">BQAAgentの実行状態と統計を表示</string>
+    <string name="notification_content_title">BQAAgent · タスク実行中</string>
+    <string name="notification_content_text">タスクを実行しています...</string>
+
+    <!-- チャネルメッセージ -->
+    <string name="channel_msg_task_cancelled">タスクを手動でキャンセルしました</string>
+    <string name="channel_msg_service_not_ready">サービスの準備ができていません。しばらくお待ちください</string>
+    <string name="channel_msg_tool_success">成功</string>
+    <string name="channel_msg_tool_failure">失敗</string>
+    <string name="channel_msg_tool_execution">[%1$s]：%2$s</string>
+    <string name="channel_msg_task_error">エラー: %s</string>
+    <string name="channel_msg_no_local_adb">Local ADB が接続されていないため、タスクを実行できません</string>
+    <string name="channel_msg_task_in_progress">タスク実行中です。お待ちください</string>
+    <string name="channel_msg_system_dialog_blocked">システムダイアログが画面を遮っている可能性があります。確認のうえ手動で操作してから再試行してください</string>
+
+    <string name="local_adb_pairing_required">先にワイヤレスデバッグを一度ペア設定してください</string>
+    <string name="local_adb_reconnecting_saved_pair">保存済みのペア設定で接続しています...</string>
+    <string name="local_adb_reconnect_failed_pair_again">保存済みのペア設定で接続できませんでした。通知でペア設定を開きました。</string>
+
+    <!-- Local ADB automation -->
+    <string name="cd_back_button">戻る</string>
+    <string name="cd_settings">設定</string>
+    <string name="cd_clear_input">入力をクリア</string>
+    <string name="cd_checkbox">チェックボックスを切替</string>
+    <string name="cd_selected">選択済み</string>
+    <string name="cd_task_success">タスク完了</string>
+    <string name="cd_task_error">タスク失敗</string>
+    <string name="cd_channel_logo">チャネルロゴ</string>
+    <string name="cd_empty_state">データなし</string>
+    <string name="cd_error_state">読み込み失敗</string>
+
+    <!-- Agent -->
+    <string name="agent_local_adb_not_ready">Local ADB が準備できていません</string>
+    <string name="agent_task_cancelled">タスクがキャンセルされました</string>
+    <string name="agent_task_completed">タスク完了</string>
+    <string name="agent_task_cancel">タスクキャンセル</string>
+    <string name="agent_api_call_failed">AIサービスの呼び出しに失敗: %s</string>
+    <string name="agent_max_iterations">タスク未完了のまま最大反復回数 (%d) に達しました</string>
+
+    <!-- ファイルツール -->
+    <string name="tool_no_storage_permission">ファイルの読み書き権限がありません</string>
+    <string name="tool_file_not_found">ファイルが見つかりません: %s</string>
+    <string name="tool_not_a_file">パスはファイルではありません: %s</string>
+    <string name="tool_no_task_channel">アクティブなタスクチャネルがありません</string>
+    <string name="tool_file_sent">ファイルを送信しました: %s</string>
+    <string name="tool_file_send_failed">ファイルの送信に失敗: %s</string>
+
+    <!-- ツール名 -->
+    <string name="tool_name_screenshot">スクリーンショット</string>
+    <string name="tool_name_send_file">ファイル送信</string>
+    <string name="tool_name_wait">待機</string>
+    <string name="tool_name_get_screen_info">画面情報を取得</string>
+    <string name="tool_name_finish">タスク完了</string>
+    <string name="tool_name_open_app">アプリを開く</string>
+    <string name="tool_name_get_installed_apps">アプリ一覧を取得</string>
+    <string name="tool_name_system_key">システムキー</string>
+    <string name="tool_name_tap">タップ</string>
+    <string name="tool_name_swipe">スワイプ</string>
+    <string name="tool_name_input_text">テキスト入力</string>
+    <string name="tool_name_find_node_info">ノード検索</string>
+    <string name="tool_name_long_press">長押し</string>
+    <string name="tool_name_repeat_actions">アクションを繰り返す</string>
+    <string name="tool_name_volume_up">音量を上げる</string>
+    <string name="tool_name_volume_down">音量を下げる</string>
+    <string name="tool_name_dpad_up">上</string>
+    <string name="tool_name_dpad_down">下</string>
+    <string name="tool_name_dpad_left">左</string>
+    <string name="tool_name_dpad_right">右</string>
+    <string name="tool_name_dpad_center">決定</string>
+    <string name="tool_name_press_menu">メニュー</string>
+    <string name="tool_name_press_power">電源</string>
+    <string name="tool_name_search_app">アプリを検索</string>
+    <string name="tool_name_clipboard">クリップボード</string>
+    <string name="tool_name_scroll_to_find">スクロールして検索</string>
+
+    <!-- 入力ダイアログ -->
+    <string name="input_dialog_need_more">%d文字以上入力してください</string>
+    <string name="input_dialog_need_less">%d文字以内で入力してください</string>
+    <string name="input_dialog_no_zero">ゼロ以外の値を入力してください</string>
+</resources>
