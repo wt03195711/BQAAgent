@@ -6,6 +6,7 @@ package io.agents.bqaagent.ui.settings
 import android.graphics.Rect
 import android.os.Bundle
 import android.view.View
+import android.view.WindowManager
 import android.widget.EditText
 import android.widget.ScrollView
 import android.widget.TextView
@@ -44,6 +45,7 @@ class VlmConfigActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         setContentView(R.layout.activity_vlm_config)
 
         val tc = ThemeManager.getColors()
@@ -265,4 +267,16 @@ class VlmConfigActivity : BaseActivity() {
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    override fun onResume() {
+        super.onResume()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
 }

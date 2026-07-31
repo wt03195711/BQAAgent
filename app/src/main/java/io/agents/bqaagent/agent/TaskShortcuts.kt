@@ -277,26 +277,33 @@ object TaskShortcuts {
             val pm = context.packageManager
             val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
 
-            // Score each app: 2 points for exact match, 1 for contains
-            val candidate = installedApps
+            val scored = installedApps
                 .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
                 .mapNotNull { info ->
                     val label = pm.getApplicationLabel(info).toString().lowercase()
                     val score = when {
-                        label == appName -> 2
-                        label.contains(appName) || appName.contains(label) -> 1
+                        label == appName -> 100
+                        label.replace(" ", "") == appName.replace(" ", "") -> 90
+                        label.contains(appName) || appName.contains(label) -> 10
                         else -> 0
                     }
-                    if (score > 0) Pair(score, info) else null
+                    if (score > 0) Triple(score, info, pm.getApplicationLabel(info).toString()) else null
                 }
-                .maxByOrNull { it.first }
-                ?.second
 
-            if (candidate == null) {
+            if (scored.isEmpty()) {
                 XLog.i(TAG, "Shortcut: no app found for \"$appName\"")
-                return null // no match; caller proceeds with agent pipeline
+                return null
             }
 
+            val bestScore = scored.maxOf { it.first }
+            val topCandidates = scored.filter { it.first == bestScore }
+            if (topCandidates.size > 1 && bestScore < 90) {
+                val names = topCandidates.joinToString(", ") { "\"${it.third}\" (${it.second.packageName})" }
+                XLog.i(TAG, "Shortcut: ambiguous match for \"$appName\": $names")
+                return "Multiple apps matched \"$appName\": $names. Please specify the exact app name or package name."
+            }
+
+            val candidate = topCandidates.first().second
             val displayLabel = pm.getApplicationLabel(candidate).toString()
             val intent = pm.getLaunchIntentForPackage(candidate.packageName)!!
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

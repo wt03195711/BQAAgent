@@ -342,7 +342,7 @@ object ChatHistoryManager {
         if (!dir.exists()) return emptyList()
 
         return dir.listFiles()
-            ?.filter { it.extension == "md" }
+            ?.filter { it.extension == "md" && !it.name.endsWith(".memory.md") }
             ?.map { file ->
                 var title = file.nameWithoutExtension
                 var id = ""

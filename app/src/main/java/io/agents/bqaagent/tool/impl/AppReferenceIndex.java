@@ -154,18 +154,30 @@ public final class AppReferenceIndex {
 
         AppReference best = null;
         int bestScore = 0;
+        int runnerUpScore = 0;
+        String runnerUpPkg = null;
         for (AppReference app : apps) {
             String label = normalizeKeyword(app.appName);
             String labelNoSpace = label.replace(" ", "");
             String pkg = normalizeKeyword(app.packageName);
             int score = score(query, queryNoSpace, label, labelNoSpace, pkg);
             if (score > bestScore) {
+                runnerUpScore = bestScore;
+                runnerUpPkg = best != null ? best.packageName : null;
                 bestScore = score;
                 best = app;
+            } else if (score > runnerUpScore) {
+                runnerUpScore = score;
+                runnerUpPkg = app.packageName;
             }
         }
 
         if (best != null && bestScore >= 100) {
+            if (runnerUpScore >= 100 && bestScore - runnerUpScore < 50) {
+                XLog.w(TAG, "Ambiguous app name '" + appName + "': best=" + best.packageName
+                        + " (score=" + bestScore + "), runnerUp=" + runnerUpPkg
+                        + " (score=" + runnerUpScore + "). Returning best match but user may need to specify package name.");
+            }
             XLog.i(TAG, "Resolved app name '" + appName + "' -> '" + best.packageName + "' (score=" + bestScore + ")");
             return best.packageName;
         }

@@ -86,9 +86,24 @@ public class OpenAppTool extends BaseTool {
 
         AppReferenceIndex.warmUp();
 
-        // If LLM sends app name instead of package name, resolve it from the cached app index.
         boolean resolvedFromName = false;
+        String ambiguityWarning = null;
         if (!looksLikePackageName(packageName)) {
+            List<AppReferenceIndex.AppReference> matches = AppReferenceIndex.listLaunchableApps(packageName);
+            if (matches.size() > 1 && matches.size() <= 5) {
+                StringBuilder sb = new StringBuilder();
+                sb.append("Multiple apps match \"").append(packageName).append("\":\n");
+                for (AppReferenceIndex.AppReference match : matches) {
+                    sb.append("  - ").append(match.toDisplayLine()).append("\n");
+                }
+                sb.append("If the wrong app was opened, retry with the exact app name or package name from the list above.");
+                ambiguityWarning = sb.toString();
+                XLog.w(TAG, "Ambiguous app name: " + packageName + " (" + matches.size() + " matches)");
+            } else if (matches.size() > 5) {
+                ambiguityWarning = "Found " + matches.size() + " apps matching \"" + packageName
+                        + "\". If the wrong app was opened, use get_installed_apps to find the exact package name and retry.";
+                XLog.w(TAG, "Ambiguous app name: " + packageName + " (" + matches.size() + " matches, truncated)");
+            }
             String resolved = resolveAppName(packageName);
             if (resolved != null) {
                 XLog.i(TAG, "Resolved app name '" + packageName + "' → '" + resolved + "'");
@@ -125,7 +140,9 @@ public class OpenAppTool extends BaseTool {
             dismissChainLaunchDialog(driver);
         }
 
-        return ToolResult.success("Opened app: " + packageName);
+        return ToolResult.success(ambiguityWarning != null
+                ? "Opened app: " + packageName + "\n\nNote: " + ambiguityWarning
+                : "Opened app: " + packageName);
     }
 
     private boolean shouldCheckChainLaunchDialog() {

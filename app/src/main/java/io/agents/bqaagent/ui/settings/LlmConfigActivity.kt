@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -49,6 +50,7 @@ class LlmConfigActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         setContentView(R.layout.activity_llm_config)
 
         // Apply dark theme from ThemeManager to match rest of app
@@ -554,9 +556,9 @@ class LlmConfigActivity : BaseActivity() {
             val provider = selectedProvider
             val apiKey = etApiKey.text.toString().trim()
             val baseUrl = if (provider == CloudProvider.CUSTOM) etBaseUrl.text.toString().trim()
-                else provider.defaultBaseUrl
+            else provider.defaultBaseUrl
             val modelId = if (provider == CloudProvider.CUSTOM) etModelName.text.toString().trim()
-                else selectedModelId
+            else selectedModelId
 
             tvStatus.visibility = View.VISIBLE
             tvStatus.text = "Testing real request..."
@@ -729,4 +731,15 @@ class LlmConfigActivity : BaseActivity() {
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+    override fun onResume() {
+        super.onResume()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
 }

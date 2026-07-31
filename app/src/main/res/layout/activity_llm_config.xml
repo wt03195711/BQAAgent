@@ -359,7 +359,7 @@
                             android:layout_weight="1"
                             android:background="@drawable/bg_edit_text"
                             android:hint="sk-..."
-                            android:inputType="textPassword"
+                            android:inputType="text"
                             android:paddingHorizontal="12dp"
                             android:textColor="@color/colorTextPrimary"
                             android:textColorHint="@color/colorTextTertiary"
