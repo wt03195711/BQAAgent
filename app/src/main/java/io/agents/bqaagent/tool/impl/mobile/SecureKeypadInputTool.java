@@ -157,25 +157,45 @@ public class SecureKeypadInputTool extends BaseTool {
 
     private void focusSecureField(LocalAdbDeviceDriver driver) {
         try { driver.getScreenTree("actionable"); } catch (Exception ignored) {}
+        int[] size = getScreenSize();
+
+        for (UiNode node : driver.currentMappedNodes()) {
+            if (!node.getFocused()) continue;
+            String focusedLabel = normalized(node.getText() + " " + node.getContentDescription() + " " + node.getResourceId());
+            if (focusedLabel.contains("pin")) return;
+        }
+
         UiNode best = null;
-        int bestScore = Integer.MIN_VALUE;
+        int bestScore = 0;
         for (UiNode node : driver.currentMappedNodes()) {
             if (!node.getEnabled()) continue;
             Rect bounds = node.getBounds();
             if (bounds == null || bounds.width() <= 0 || bounds.height() <= 0) continue;
-            String label = normalized(node.getText() + " " + node.getContentDescription() + " " + node.getResourceId());
+            if (bounds.width() > size[0] * 0.9f || bounds.height() > size[1] * 0.35f) continue;
+
+            String text = normalized(node.getText());
+            String description = normalized(node.getContentDescription());
+            String label = text + " " + description + " " + normalized(node.getResourceId());
             if (!label.contains("pin")) continue;
-            if (label.contains("forgot") || label.contains("help")) continue;
+            if (label.contains("forgot") || label.contains("help") || label.contains("?") ||
+                    label.contains("帮助") || label.contains("幫助") ||
+                    label.contains("忘记") || label.contains("忘記") || label.contains("忘了") ||
+                    label.contains("问题") || label.contains("問題") || label.contains("客服")) continue;
+
             int score = 0;
-            if (node.getClickable()) score += 30;
-            if (label.contains("input") || label.contains("enter")) score += 40;
-            if (node.getCenterY() < getScreenSize()[1] * 0.45f) score += 10;
+            if (node.isEditable()) score += 100;
+            if (text.contains("pin") || description.contains("pin")) score += 40;
+            if (label.contains("input") || label.contains("enter") ||
+                    label.contains("请输入") || label.contains("請輸入") || label.contains("输入")) score += 30;
+            if (node.getFocused()) score += 30;
+            if (node.getClickable()) score += 10;
+            if (node.getCenterY() < size[1] * 0.45f) score += 5;
             if (score > bestScore) {
                 best = node;
                 bestScore = score;
             }
         }
-        if (best != null) {
+        if (best != null && bestScore >= 40) {
             driver.performTap(best.getCenterX(), best.getCenterY());
             sleep(350);
         }
