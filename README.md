@@ -4,7 +4,9 @@ BQAAgent is an AI-powered automated test execution engine built for HSBC mobile 
 ## Table of Contents
 - [Key Features](#key-features)
   - [Core Capabilities](#core-capabilities)
-  - [New Enhanced Features](#new-enhanced-features)
+- [Release Notes](#release-notes)
+  - [v0.0.2 New Features](#v002-new-features)
+  - [v0.0.1 Features](#v001-features)
 - [Architecture Overview](#architecture-overview)
   - [Task Execution Flow](#task-execution-flow)
 - [Toolkit List](#toolkit-list)
@@ -148,26 +150,61 @@ Other Basic Capabilities
 - Request battery optimization exemption to avoid background process kill
 - Light & Dark theme
 - New user guide
-- Multi-language support: Chinese / English / Japanese
+- Multi-language support: Chinese / English
 
 ---
 
-### New Enhanced Features
-#### Vision Model (VLM) Analysis
+## Release Notes
+### v0.0.2 New Features
+#### 🎬 Skill Record / Save / Replay
+A reusable skill system built on real task execution traces, distilling "one successful automation flow" into a repeatedly replayable template:
+- **Recording (SkillRecorder)**: during the Agent Loop every replayable tool step is captured automatically (tap, input, swipe, open app, send message, etc.), together with a node locator snapshot (nodeLocator), target text, anchor texts, expected package / activity and step intent
+- **Saving (SkillAnalyzer / SkillTemplateBuilder / SkillStore)**: after a successful task a dialog offers to save; generating an execution template bound to the device environment (language, region, resolution, font scale, app versions) and persisting it
+- **Matching (SkillMatcher three gates + environment pre-filter)**: a new task is first filtered by environment, then matched via Level 0 verbatim equality / template attribution, verbatim parameter validation and parameter-contract completeness — to prevent stale-value misuse
+- **Replay (SkillReplayer + ReplayVerifier)**: on a hit a confirmation dialog shows the parameter-substitution preview and step timeline; after user confirmation, parameters are substituted by anchoring and value-tracing rules, each step executes and is verified ready by package / activity / anchor texts, and failures automatically degrade back to the Agent Loop
+- **Governance (SkillGovernor)**: tracks template success rate and marks a template unavailable after consecutive failures to keep replay stable
+
+#### 📹 Task Screen Recording
+Task-scoped screen recording that fully preserves the automation process for review and troubleshooting:
+- **Segmented capture (AdbScreenRecorder)**: based on ADB screenrecord with ~2-minute safe rotation, overlap-rotation duplicate frames clipped, and a dedicated KADB channel that never interferes with automation
+- **Non-blocking coordination (TaskRecordingCoordinator)**: arm / start / stop are all asynchronous; any recording failure downgrades to "no recording" and never affects the task; off by default and only touches the device once enabled
+- **Step markers (addMarker)**: key steps are marked during recording and can be jumped to on playback
+- **Seamless playback (RecordingPlaylist + Media3 ExoPlayer)**: multiple segments merge into one continuous timeline with a single progress bar and seam-free seeking
+- **Self-test (RecordingSelfTest)**: one tap checks ADB config, shell channel, screenrecord binary, resolution, storage and background-launch capability, auto-adapting recording parameters
+- **Storage management (TaskRecordingStore)**: manifest.json persistence with automatic cleanup at the storage cap
+
+#### ✅ Four-Way Task Result Classification
+A unified, trustworthy terminal-state model that makes the judging authority explicit:
+- **SUCCESS / FAILED**: decided by the LLM via `finish(status=...)`; SUCCESS additionally passes a lightweight system evidence check (a non-chat task claiming success with zero successful device actions is downgraded to FAILED / UNVERIFIED)
+- **STOPPED**: decided by system code (token / iteration limits, stuck detector, system dialog, unusable screen, sensitive policy, image-analysis termination, etc.)
+- **CANCELLED**: decided by the user
+- A backend `TaskReasonCode` carries fine-grained reasons for diagnostics, while the UI shows only the four terminal states
+
+#### 🔍 Screen Data Parsing Optimization
+Higher-quality, more efficient UI-tree capture giving the Agent more precise screen information:
+- **UiAutomator2 `--compressed` capture**: no temporary-file IO, faster and smaller XML, with automatic v1 fallback on older versions
+- **Multiple render modes**: detail (per-node, richest; cloud default) / compact (row-grouped, token-saving; forced for local models) / text (text rows only) / full (raw tree for debugging)
+- **Screen snapshot cache (ScreenTreeCache)**: cache hits within 2s validated against foreground package / activity to avoid redundant dumps
+- **Node ID mapping (nodeIdMap)**: every element line carries its own node id and coordinates for precise `tap_node`; multiple elements in one row are individually addressable
+- **Screen settle waiting (ScreenSettleWaiter)**: two-stage change detection after actions waits for the page to truly settle before capture, avoiding transitional states
+- **Structural-container filtering and label enrichment**: compress low-value nodes and raise effective information density
+
+### v0.0.1 Features
+#### 👁️ Vision Model (VLM) Analysis
 Activate VLM as fallback when ADB UI tree fails or target elements cannot be located via view hierarchy, applicable to specially rendered pages in financial applications:
 - `VisionAnalyzer`: Send screenshot + test intent to vision model for operation planning
 - `AnalyzeScreenVisualTool`: Auto screenshot, secure screen detection, image preprocessing, VLM parsing and coordinate conversion
 - VLM outputs standardized JSON including page summary, action type, pixel coordinates and reasoning
 - VLM configuration is independent from LLM; compatible with GPT-4o, Gemini, Qwen-VL and other vision models
 
-#### User Image Upload Fallback
+#### 📷 User Image Upload Fallback
 Solve screenshot interception caused by `FLAG_SECURE` (banking apps, PIN input screens):
 - Prompt users to manually upload screenshots
 - Multi-layer validation: file size, resolution, sandbox path isolation
 - Automatic correction for perspective distortion, reflection and frame occlusion
 - Verify image relevance; terminate task if irrelevant images are uploaded. Clean temporary files after analysis.
 
-#### On-Device Offline Speech Input
+#### 🎙️ On-Device Offline Speech Input
 Built on sherpa-onnx offline speech recognition:
 - Zipformer2 Transducer int8 quantized model, CPU inference
 - 16kHz PCM streaming recognition with endpoint detection
@@ -175,7 +212,7 @@ Built on sherpa-onnx offline speech recognition:
 - Long press to record; release to trigger recognition of test instructions
 - Supported ABIs: arm64-v8a / armeabi-v7a / x86 / x86_64
 
-#### Sensitive Mode
+#### 🔒 Sensitive Mode
 Runtime protection policy designed for banking applications including HSBC:
 - Trigger condition: Sensitive Mode enabled + foreground app matches sensitive application list
 - Tool restrictions: Disable screenshot and file transfer to prevent information leakage
@@ -225,7 +262,7 @@ Test Instruction → PipelineRouter.route()
 ## Toolkit List
 | Category | Tool Name | Description |
 |----------|-----------|-------------|
-| **Screen Observation** | get_screen_info | Fetch ADB UI tree (compact/full/form/text modes) |
+| **Screen Observation** | get_screen_info | Fetch ADB UI tree (detail/compact/text/full modes) |
 | | find_node_info | Query details of UI node |
 | | take_screenshot | Capture screenshot via ADB |
 | | analyze_screen_visual | VLM visual analysis (Enhanced Feature) |
@@ -274,6 +311,8 @@ Test Instruction → PipelineRouter.route()
 | Network | OkHttp with logging interceptor |
 | Persistent Storage | MMKV + SQLite + Markdown |
 | ADB Automation | kadb (Kotlin ADB Client) |
+| Screen Recording | ADB screenrecord (segmented rotation + dedicated KADB channel) |
+| Recording Playback | Media3 ExoPlayer (seamless multi-segment timeline) |
 | Floating Window | EasyFloat |
 | Image Loader | Glide |
 | Local Web Server | NanoHTTPD |
@@ -309,8 +348,8 @@ KEY_PASSWORD=xxx
 ### Version Configuration
 Version injected via `local.properties` or environment variables:
 ```properties
-BQAAGENT_VERSION_CODE=1
-BQAAGENT_VERSION_NAME=0.0.1
+BQAAGENT_VERSION_CODE=2
+BQAAGENT_VERSION_NAME=0.0.2
 ```
 
 ### Output Artifact
@@ -327,7 +366,7 @@ app/src/main/
 │   ├── adb/                  # ADB driver & device automation
 │   ├── agent/                # Core agent test engine
 │   │   ├── llm/              # LLM clients (cloud / local)
-│   │   ├── skill/            # Skill registration & execution
+│   │   ├── skill/            # Skill registration, execution, recording, saving, matching & replay
 │   │   ├── knowledge/        # Knowledge base manager
 │   │   └── langchain/        # LangChain4j tool bridge
 │   ├── automation/           # External automation broadcast interface
@@ -335,6 +374,7 @@ app/src/main/
 │   ├── channel/              # Configuration channel management
 │   ├── fallback/             # Fallback UI locator system
 │   ├── floating/             # Floating window manager
+│   ├── recording/            # Task screen recording: capture, segmentation, playback, self-test, storage
 │   ├── server/               # LAN HTTP configuration server
 │   ├── service/              # Background services: notification listener, auto-reply, keep-alive
 │   ├── tool/                 # Tool registry & implementations

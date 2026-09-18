@@ -3,10 +3,12 @@ BQAAgent 是运行在 Android 设备上、**面向 HSBC 移动端应用打造的
 
 ## 📋 目录
 - [✨ 项目特性](#-项目特性)
-    - [基础版功能](#基础版功能)
-    - [🚀 新版增强功能](#-新版增强功能)
+  - [基础版功能](#基础版功能)
+- [🚀 版本更新说明](#-版本更新说明)
+  - [v0.0.2 新增功能](#v002-新增功能)
+  - [v0.0.1 功能](#v001-功能)
 - [🏗️ 技术架构](#️-技术架构)
-    - [任务执行流程](#任务执行流程)
+  - [任务执行流程](#任务执行流程)
 - [🛠️ 支持工具集](#️-支持工具集)
 - [📦 技术栈](#-技术栈)
 - [🔨 构建说明](#-构建说明)
@@ -148,11 +150,46 @@ Agent在测试执行中可随时读写、检索测试数据、业务规则信息
 - 电池优化豁免申请，防止后台测试进程被杀
 - 明暗双主题
 - 新手引导流程
-- 多语言：中文 / 英文 / 日文
+- 多语言：中文 / 英文 
 
 ---
 
-### 🚀 新版增强功能
+## 🚀 版本更新说明
+### v0.0.2 新增功能
+#### 🎬 Skill 录制 / 保存 / 回放
+基于真实任务执行轨迹的可复用技能系统，把「一次成功的自动化流程」沉淀为可反复回放的模板：
+- **录制（SkillRecorder）**：Agent Loop 执行过程中自动记录每个可回放工具步骤（点击、输入、滑动、打开应用、发送消息等），同步快照节点定位信息（nodeLocator）、目标文本、锚点文本、期望包名 / Activity 与步骤意图
+- **保存（SkillAnalyzer / SkillTemplateBuilder / SkillStore）**：任务成功后弹窗提示保存，按设备环境（语言、地区、分辨率、字体缩放、应用版本）生成执行模板并持久化
+- **匹配（SkillMatcher 三道闸门 + 环境预过滤）**：新任务到来时先做环境筛选，再经 Level 0 原文精确匹配
+- **回放（SkillReplayer + ReplayVerifier）**：命中后先弹出确认框展示参数替换预览与步骤时间线，用户确认后按锚定与值追踪规则替换参数，逐步执行并以「包名 / Activity / 锚点文本」验证每一步就绪，失败自动降级回 Agent Loop
+- **治理（SkillGovernor）**：统计模板成功率，连续失败自动标记不可用，保障回放稳定性
+
+#### 📹 任务过程录屏
+任务级屏幕录制，完整留存自动化测试执行过程，便于回溯与问题定位：
+- **分段录制（AdbScreenRecorder）**：基于 ADB screenrecord，约 2 分钟安全轮转，重叠旋转自动裁剪重复帧，独立 KADB 通道不干扰自动化操作
+- **非阻塞协调（TaskRecordingCoordinator）**：arm / start / stop 全部异步，录制失败自动降级为「无录制」，绝不影响任务执行；默认关闭，开启后才接触设备
+- **步骤标记（addMarker）**：录制过程中打点关键步骤，回放时可跳转定位
+- **无缝播放（RecordingPlaylist + Media3 ExoPlayer）**：多段视频合并为单一连续时间轴，单进度条跨段拖动无卡顿
+- **录制自检（RecordingSelfTest）**：一键检测设备 ADB 配置、shell 通道、screenrecord 二进制、分辨率、存储空间与后台启动能力，自动适配录制参数
+- **存储管理（TaskRecordingStore）**：录制清单 manifest.json 持久化，达到存储上限自动清理
+
+#### ✅ 任务结果状态四分类
+统一、可信的任务终态模型，明确区分「判定权归属」：
+- **SUCCESS / FAILED**：由 LLM 通过 `finish(status=...)` 判定；SUCCESS 额外经过轻量系统证据校验（无成功设备操作的非闲聊任务会被降级为 FAILED / UNVERIFIED）
+- **STOPPED**：由系统代码判定（Token / 迭代上限、死循环、系统弹窗、屏幕不可用、敏感策略、图像分析终止等）
+- **CANCELLED**：由用户主动取消
+- 后端携带 `TaskReasonCode` 细分原因码用于诊断，前端仅展示四类终态
+
+#### 🔍 屏幕数据解析优化
+提升 UI 树采集质量与解析效率，为 Agent 决策提供更精准的屏幕信息：
+- **UiAutomator2 `--compressed` 压缩抓取**：无临时文件 IO，速度更快、XML 体积更小，低版本自动降级 v1 方案
+- **多渲染模式**：detail（逐节点最全，云端默认）/ compact（行分组省 token，本地模型强制）/ text（纯文本行）/ full（原始树调试）
+- **屏幕快照缓存（ScreenTreeCache）**：2 秒内命中缓存并校验前台包名 / Activity，避免重复 dump
+- **节点 ID 映射（nodeIdMap）**：每个元素行携带独立 node id 与坐标，支持 `tap_node` 精准点击，行内多元素各自寻址
+- **屏幕稳定等待（ScreenSettleWaiter）**：操作后两阶段变化检测，等待页面真正稳定再采集，避免抓到过渡态
+- **结构化容器过滤与标签富化**：压缩无效节点，提升有效信息密度
+
+### v0.0.1 功能
 #### 👁️ 视觉大模型分析（VisionModel / VLM）
 当ADB UI树失效、目标元素无法通过控件定位时，启用VLM作为兜底识别方案，应对金融App特殊渲染页面：
 - `VisionAnalyzer`：截图+测试意图发送至视觉模型获取操作方案
@@ -225,7 +262,7 @@ flowchart TD
 ## 🛠️ 支持工具集
 | 分类 | 工具名称 | 说明 |
 |------|----------|------|
-| **屏幕感知** | get_screen_info | 获取ADB UI树（compact/full/form/text多种模式） |
+| **屏幕感知** | get_screen_info | 获取ADB UI树（detail/compact/text/full 模式） |
 | | find_node_info | 查询控件节点详情 |
 | | take_screenshot | ADB截图 |
 | | analyze_screen_visual | VLM自动视觉分析（新版） |
@@ -274,6 +311,8 @@ flowchart TD
 | 网络 | OkHttp + 日志拦截器 |
 | 持久化存储 | MMKV + SQLite + Markdown |
 | ADB自动化 | kadb（Kotlin ADB客户端） |
+| 屏幕录制 | ADB screenrecord（分段轮转 + 独立 KADB 通道） |
+| 录屏播放 | Media3 ExoPlayer（多段无缝合并时间轴） |
 | 悬浮窗 | EasyFloat |
 | 图片加载 | Glide |
 | 局域网Web服务 | NanoHTTPD |
@@ -309,8 +348,8 @@ KEY_PASSWORD=xxx
 ### 版本配置
 版本号通过 `local.properties` / 环境变量注入：
 ```properties
-BQAAGENT_VERSION_CODE=1
-BQAAGENT_VERSION_NAME=0.0.1
+BQAAGENT_VERSION_CODE=2
+BQAAGENT_VERSION_NAME=0.0.2
 ```
 
 ### 输出产物
@@ -327,7 +366,7 @@ app/src/main/
 │   ├── adb/                  # ADB驱动与设备自动化
 │   ├── agent/                # Agent核心测试引擎
 │   │   ├── llm/              # LLM客户端（云端/本地）
-│   │   ├── skill/            # 技能系统：注册、执行
+│   │   ├── skill/            # 技能系统：注册、执行、录制、保存、匹配、回放
 │   │   ├── knowledge/        # 知识库管理
 │   │   └── langchain/        # LangChain4j工具桥接
 │   ├── automation/           # 外部自动化广播接口
@@ -335,6 +374,7 @@ app/src/main/
 │   ├── channel/              # 通道配置管理
 │   ├── fallback/             # UI兜底定位系统
 │   ├── floating/             # 悬浮窗管理
+│   ├── recording/            # 任务过程录屏：录制、分段、播放、自检、存储
 │   ├── server/               # 局域网HTTP配置服务
 │   ├── service/              # 后台服务：通知监听、自动回复、保活
 │   ├── tool/                 # 工具注册表与实现
