@@ -41,6 +41,18 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content" />
 
+            <!-- Skill Management -->
+            <io.agents.bqaagent.widget.MenuGroup
+                android:id="@+id/skillManagerGroup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+
+            <!-- Task Recording -->
+            <io.agents.bqaagent.widget.MenuGroup
+                android:id="@+id/recordingGroup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+
             <!-- Tools -->
             <io.agents.bqaagent.widget.MenuGroup
                 android:id="@+id/toolsGroup"

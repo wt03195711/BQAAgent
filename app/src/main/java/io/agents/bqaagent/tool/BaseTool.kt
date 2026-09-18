@@ -79,6 +79,14 @@ abstract class BaseTool {
     /** Display name shown to the user; subclasses may override */
     open fun getDisplayName(): String = getName()
 
+    /**
+     * Names of the parameters that carry user-supplied dynamic values
+     * (used by skill recording and parameter derivation). Empty means this
+     * tool has no parameterizable user value. Sensitive tools (PIN entry)
+     * must keep the default empty list.
+     */
+    open fun getValueParamNames(): List<String> = emptyList()
+
     // === Parameter helpers ===
 
     protected fun requireString(params: @JvmSuppressWildcards Map<String, Any>, key: String): String {

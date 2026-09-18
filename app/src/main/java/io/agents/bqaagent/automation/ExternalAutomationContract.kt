@@ -37,6 +37,7 @@ object ExternalAutomationContract {
     const val STATUS_FAILED = "failed"
     const val STATUS_CANCELLED = "cancelled"
     const val STATUS_BLOCKED = "blocked"
+    const val STATUS_STOPPED = "stopped"
     const val STATUS_REJECTED = "rejected"
 
     private const val TAG = "ExternalAutomation"

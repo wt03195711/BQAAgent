@@ -52,6 +52,11 @@ public class OpenAppTool extends BaseTool {
     }
 
     @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("package_name");
+    }
+
+    @Override
     public String getDisplayName() {
         return ClawApplication.Companion.getInstance().getString(R.string.tool_name_open_app);
     }
@@ -69,7 +74,10 @@ public class OpenAppTool extends BaseTool {
     @Override
     public List<ToolParameter> getParameters() {
         return Collections.singletonList(
-                new ToolParameter("package_name", "string", "The app name or package name to open, e.g. 'HSBC Singapore Cert' or 'com.android.settings'", true)
+                new ToolParameter("package_name", "string",
+                        "The app name EXACTLY as the user said it (preferred), or a package name you are completely certain about. "
+                                + "Do NOT translate, abbreviate, or rephrase the app name, and do NOT guess package names — "
+                                + "the tool resolves names against the installed-app index on the device.", true)
         );
     }
 
@@ -79,60 +87,42 @@ public class OpenAppTool extends BaseTool {
         if (driver == null) {
             return ToolResult.error("Local ADB is not ready");
         }
-        String packageName = params.containsKey("package_name")
+        String requestedApp = params.containsKey("package_name")
                 ? requireString(params, "package_name")
                 : requireString(params, "app_name");
-        String requestedApp = packageName;
 
         AppReferenceIndex.warmUp();
+        AppReferenceIndex.ResolveResult result = AppReferenceIndex.resolveApp(requestedApp);
 
-        boolean resolvedFromName = false;
-        String ambiguityWarning = null;
-        if (!looksLikePackageName(packageName)) {
-            List<AppReferenceIndex.AppReference> matches = AppReferenceIndex.listLaunchableApps(packageName);
-            if (matches.size() > 1 && matches.size() <= 5) {
-                StringBuilder sb = new StringBuilder();
-                sb.append("Multiple apps match \"").append(packageName).append("\":\n");
-                for (AppReferenceIndex.AppReference match : matches) {
-                    sb.append("  - ").append(match.toDisplayLine()).append("\n");
-                }
-                sb.append("If the wrong app was opened, retry with the exact app name or package name from the list above.");
-                ambiguityWarning = sb.toString();
-                XLog.w(TAG, "Ambiguous app name: " + packageName + " (" + matches.size() + " matches)");
-            } else if (matches.size() > 5) {
-                ambiguityWarning = "Found " + matches.size() + " apps matching \"" + packageName
-                        + "\". If the wrong app was opened, use get_installed_apps to find the exact package name and retry.";
-                XLog.w(TAG, "Ambiguous app name: " + packageName + " (" + matches.size() + " matches, truncated)");
+        if (!result.isResolved()) {
+            if (!result.candidates.isEmpty()) {
+                return ToolResult.error(buildAmbiguousMessage(requestedApp, result));
             }
-            String resolved = resolveAppName(packageName);
-            if (resolved != null) {
-                XLog.i(TAG, "Resolved app name '" + packageName + "' → '" + resolved + "'");
-                packageName = resolved;
-                resolvedFromName = true;
-            }
+            return ToolResult.error(buildNotFoundMessage(requestedApp));
+        }
+
+        String packageName = result.packageName;
+        if (!packageName.equals(requestedApp.trim())) {
+            XLog.i(TAG, "Resolved '" + requestedApp + "' -> '" + packageName + "'");
         }
 
         boolean success = driver.openApp(packageName);
-        if (!success && looksLikePackageName(packageName)) {
-            String guessedAlias = packageName.substring(packageName.lastIndexOf('.') + 1);
-            String aliasResolved = resolveAppName(guessedAlias);
-            if (aliasResolved != null && !aliasResolved.equals(packageName)) {
-                XLog.i(TAG, "Retrying open after guessed package fallback: " + packageName + " → " + aliasResolved);
-                packageName = aliasResolved;
-                success = driver.openApp(packageName);
-            }
-        }
-        if (!success && resolvedFromName) {
+        if (!success) {
             AppReferenceIndex.refresh();
-            String refreshedPackageName = resolveAppName(requestedApp);
-            if (refreshedPackageName != null && !refreshedPackageName.equals(packageName)) {
-                XLog.i(TAG, "Retrying open after app index refresh: " + requestedApp + " → " + refreshedPackageName);
-                packageName = refreshedPackageName;
+            AppReferenceIndex.ResolveResult retried = AppReferenceIndex.resolveApp(requestedApp);
+            if (retried.isResolved() && !retried.packageName.equals(packageName)) {
+                packageName = retried.packageName;
+                XLog.i(TAG, "Retrying open after app index refresh: " + requestedApp + " -> " + packageName);
                 success = driver.openApp(packageName);
+            } else if (!retried.isResolved()) {
+                if (!retried.candidates.isEmpty()) {
+                    return ToolResult.error(buildAmbiguousMessage(requestedApp, retried));
+                }
+                return ToolResult.error(buildNotFoundMessage(requestedApp));
             }
         }
         if (!success) {
-            return ToolResult.error("Failed to open app: " + packageName + ". Make sure the app is installed.");
+            return ToolResult.error(buildLaunchFailedMessage(requestedApp, packageName));
         }
 
         // Wait for possible chain-launch intercept dialog and auto-click "Allow"
@@ -140,9 +130,30 @@ public class OpenAppTool extends BaseTool {
             dismissChainLaunchDialog(driver);
         }
 
-        return ToolResult.success(ambiguityWarning != null
-                ? "Opened app: " + packageName + "\n\nNote: " + ambiguityWarning
-                : "Opened app: " + packageName);
+        return ToolResult.success("Opened app: " + packageName);
+    }
+
+    private String buildAmbiguousMessage(String requestedApp, AppReferenceIndex.ResolveResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("No exact installed match for \"").append(requestedApp)
+                .append("\". Closest candidates (partial matches, NOT opened):\n");
+        for (AppReferenceIndex.AppReference candidate : result.candidates) {
+            sb.append("  - ").append(candidate.toDisplayLine()).append("\n");
+        }
+        sb.append("If the app the user wants is in the list, retry open_app with its EXACT app name or package name. ")
+                .append("If it is not in the list, call get_installed_apps(keyword=...) to search; if still not found, the app is not installed.");
+        return sb.toString();
+    }
+
+    private String buildNotFoundMessage(String requestedApp) {
+        return "Failed to resolve app \"" + requestedApp + "\": no installed app matched by name, package name, alias, or keyword. "
+                + "Do NOT conclude it is uninstalled yet. Call get_installed_apps(keyword=\"<main keyword of the app name>\") to look up the exact package name, then retry open_app with it. "
+                + "If the lookup is also empty, the app is likely not installed: call finish and tell the user.";
+    }
+
+    private String buildLaunchFailedMessage(String requestedApp, String packageName) {
+        return "Failed to launch " + packageName + " (resolved from \"" + requestedApp + "\") even though it is in the installed-app index. "
+                + "Call get_installed_apps to confirm the package name, then retry once with the exact package name; if it still fails, call finish and report the problem.";
     }
 
     private boolean shouldCheckChainLaunchDialog() {
@@ -186,21 +197,9 @@ public class OpenAppTool extends BaseTool {
         return matchesAllowButton(node.getText()) || matchesAllowButton(node.getContentDescription());
     }
 
-    /**
-     * Resolve common app names to package names.
-     * Falls back to searching installed apps by label.
-     */
-    /** Public static version for other tools to reuse */
+    /** Public static version for other tools to reuse (delegates to the staged resolver). */
     public static String resolveAppNameStatic(String appName) {
         return AppReferenceIndex.resolvePackageName(appName);
-    }
-
-    private String resolveAppName(String appName) {
-        return AppReferenceIndex.resolvePackageName(appName);
-    }
-
-    private boolean looksLikePackageName(String value) {
-        return value != null && value.trim().matches("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+");
     }
 
     /**

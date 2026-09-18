@@ -28,28 +28,23 @@ public class GetScreenInfoTool extends BaseTool {
 
     @Override
     public String getDescriptionEN() {
-        return "Get the current screen's UI elements from ADB dump. Optional mode: compact (default, row-compressed), form (fields/actions), actionable (clickable/editable nodes), or text (visible text rows). Node IDs (e.g. [n3]) can be used with tap_node and stay valid for the current snapshot.";
+        return "Get the current screen's UI elements from ADB dump. Modes: detail (richest; every addressable element on its own line with node id + class + label + flags + tap coordinates + resource-id + bounds), compact (row-grouped, token-saving; every element in a row carries its OWN node id + tap coordinates), text (visible text rows only, no ids), full (complete raw node tree with class/package/bounds, for debugging hard cases). Every element line has a node id (e.g. [n12]) usable with tap_node and valid for the current snapshot; when a line lists multiple elements, use the id/coordinates of the element matching your target.";
     }
 
     @Override
     public String getDescriptionCN() {
-        return "Get the current screen's UI elements from ADB dump. Optional mode: compact (default, row-compressed), form (fields/actions), actionable (clickable/editable nodes), or text (visible text rows). Node IDs (e.g. [n3]) can be used with tap_node and stay valid for the current snapshot.";
+        return "Get the current screen's UI elements from ADB dump. Modes: detail (richest; every addressable element on its own line with node id + class + label + flags + tap coordinates + resource-id + bounds), compact (row-grouped, token-saving; every element in a row carries its OWN node id + tap coordinates), text (visible text rows only, no ids), full (complete raw node tree with class/package/bounds, for debugging hard cases). Every element line has a node id (e.g. [n12]) usable with tap_node and valid for the current snapshot; when a line lists multiple elements, use the id/coordinates of the element matching your target.";
     }
 
     @Override
     public List<ToolParameter> getParameters() {
         return Arrays.asList(
-                new ToolParameter("mode", "string", "Optional output mode: compact, form, actionable, or text. Default: compact.", false)
+                new ToolParameter("mode", "string", "Output mode: detail (per-element, richest), compact (row-grouped), text (text rows), full (complete raw tree). Default: compact when unspecified.", false)
         );
     }
 
     public static final String SYSTEM_DIALOG_BLOCKED = "__SYSTEM_DIALOG_BLOCKED__";
 
-    /**
-     * Switch to full node tree mode (includes all nodes and all attributes, for debugging).
-     * false = compact mode (default, saves tokens); true = full mode.
-     */
-    public static boolean useFullTree = false;
 
     @Override
     public ToolResult execute(Map<String, Object> params) {
@@ -59,7 +54,7 @@ public class GetScreenInfoTool extends BaseTool {
         }
         Object modeValue = params == null ? null : params.get("mode");
         String mode = modeValue == null ? null : String.valueOf(modeValue);
-        String tree = useFullTree ? driver.getScreenTreeFull() : driver.getScreenTree(mode);
+        String tree = driver.getScreenTree(mode);
         if (tree == null) {
             return ToolResult.error(SYSTEM_DIALOG_BLOCKED);
         }

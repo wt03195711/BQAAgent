@@ -16,18 +16,26 @@ import io.agents.bqaagent.AppCapabilityCoordinator
 import io.agents.bqaagent.AppViewModel
 import io.agents.bqaagent.ServiceBindingState
 import io.agents.bqaagent.TaskEvent
+import io.agents.bqaagent.TaskReasonCode
+import io.agents.bqaagent.TaskStatus
 import io.agents.bqaagent.agent.DirectDeviceDataGuard
 import io.agents.bqaagent.agent.PipelineRouter
 import io.agents.bqaagent.agent.TaskPromptEnvelope
 import io.agents.bqaagent.agent.llm.ModelConfigRepository
-import io.agents.bqaagent.service.ForegroundService
+import io.agents.bqaagent.agent.skill.SkillDefinition
+import io.agents.bqaagent.agent.skill.SkillGovernor
+import io.agents.bqaagent.agent.skill.SkillSaveData
+import io.agents.bqaagent.agent.skill.SkillStore
+import io.agents.bqaagent.agent.skill.SkillTemplateBuilder
 import io.agents.bqaagent.service.AutoReplyManager
 import io.agents.bqaagent.adb.LocalAdbAutomation
 import io.agents.bqaagent.tool.ToolRegistry
 import io.agents.bqaagent.ui.settings.SettingsActivity
+import io.agents.bqaagent.ui.settings.SkillManagerActivity
 import io.agents.bqaagent.utils.KVUtils
 import io.agents.bqaagent.utils.XLog
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.ExecutorService
 
 data class TaskFlowUiState(
@@ -37,6 +45,8 @@ data class TaskFlowUiState(
     val isTaskRunning: MutableState<Boolean>,
     val showUserImageUpload: MutableState<Boolean> = androidx.compose.runtime.mutableStateOf(false),
     val screenshotBlockedIntent: MutableState<String> = androidx.compose.runtime.mutableStateOf(""),
+    val skillSaveOverlayState: MutableState<SkillSaveOverlayState> =
+        androidx.compose.runtime.mutableStateOf(SkillSaveOverlayState.Hidden),
 )
 
 /**
@@ -58,14 +68,21 @@ class TaskFlowController(
 
     companion object {
         private const val TAG = "TaskFlowController"
+        /** Upper bound for the auto-derived default title (always ≤ SKILL_TITLE_MAX_LENGTH) */
+        private const val DEFAULT_TITLE_MAX_LENGTH = 30
+        /** Hard cap on saved skills. Exceeding it fails a NEW-skill save so the user can prune in Settings and Retry. */
+        private const val MAX_SKILLS = 50
     }
 
     val showUserImageUpload: Boolean get() = uiState.showUserImageUpload.value
+
+    val skillSaveOverlay: MutableState<SkillSaveOverlayState> get() = uiState.skillSaveOverlayState
 
     private var sendTaskRetryCount = 0
     private var lastMonitorStatusNote: String? = null
     private val pipelineRouter = PipelineRouter(activity)
     private var activeToolGroupIndex: Int? = null
+    private var activeReplayGroupIndex: Int? = null
     private val loopStartedAt = mutableMapOf<Int, Long>()
     private var lastTotalTokens = 0
     private var lastEstimatedCostUsd = 0.0
@@ -317,23 +334,58 @@ class TaskFlowController(
         try {
             when (event) {
                 is TaskEvent.Completed -> {
-                    replaceTypingIndicator(event.answer, event.modelName)
+                    val isChatOnly = event.reasonCode == TaskReasonCode.CHAT_ONLY
+                    val chatTaskStatus = if (isChatOnly) null else TaskStatus.SUCCESS
+                    // Pure chat never records a device session. The agent-loop arms/starts recording
+                    // before it knows the turn is chat-only, so currentRecordingId() would still hand
+                    // back that (discarded) id — suppress the chip for CHAT_ONLY.
+                    val recordingId = if (isChatOnly) null else currentRecordingId()
+                    // A chat-only turn routed through the AgentLoop still accumulated an LLM-step
+                    // group (TokenUpdate -> addLlmStep). Drop it so chat always renders as a single
+                    // reply bubble — identical to the small-talk fast path — never as a task w/ steps.
+                    if (isChatOnly) removeCurrentToolGroup()
+                    replaceTypingIndicator(event.answer, event.modelName, recordingId, chatTaskStatus)
+                    if (event.skillSaveData != null) {
+                        uiState.skillSaveOverlayState.value = SkillSaveOverlayState.OfferSave(event.skillSaveData)
+                    }
                     onTaskTerminal?.invoke(event)
                     cleanupAfterTask()
                     checkAutoReplyConfirmation()
                 }
                 is TaskEvent.Failed -> {
-                    replaceTypingIndicator("Error: ${event.error}")
+                    if (uiState.skillSaveOverlayState.value is SkillSaveOverlayState.OfferReplay) {
+                        uiState.skillSaveOverlayState.value = SkillSaveOverlayState.Hidden
+                    }
+                    replaceTypingIndicator(event.error, recordingId = currentRecordingId(), taskStatus = TaskStatus.FAILED)
                     onTaskTerminal?.invoke(event)
                     cleanupAfterTask()
                 }
                 is TaskEvent.Cancelled -> {
-                    removeTypingIndicator()
+                    if (uiState.skillSaveOverlayState.value is SkillSaveOverlayState.OfferReplay) {
+                        uiState.skillSaveOverlayState.value = SkillSaveOverlayState.Hidden
+                    }
+                    // Surface a terminal bubble (status header + text) instead of silently dropping
+                    // the typing indicator. No recordingId: a user cancel discards the footage
+                    // (TaskRecordingCoordinator deletes it on RecordingOutcome.CANCELLED), so a chip
+                    // here would be a dead link.
+                    replaceTypingIndicator(
+                        "Task cancelled by user.",
+                        taskStatus = TaskStatus.CANCELLED
+                    )
                     onTaskTerminal?.invoke(event)
                     cleanupAfterTask()
                 }
-                is TaskEvent.Blocked -> {
-                    replaceTypingIndicator("Blocked by system dialog.")
+                is TaskEvent.Stopped -> {
+                    // The status header already reads "Task stopped", so drop the redundant
+                    // "Task stopped:" / "Task stopped " lead-in most stop messages carry
+                    // (mirrors the SUCCESS branch stripping "Task completed:"). onError/system-dialog
+                    // messages have no such prefix and pass through unchanged.
+                    val stopText = event.message
+                        .removePrefix("Task stopped:")
+                        .removePrefix("Task stopped")
+                        .trim()
+                        .ifEmpty { event.message }
+                    replaceTypingIndicator(stopText, recordingId = currentRecordingId(), taskStatus = TaskStatus.STOPPED)
                     onTaskTerminal?.invoke(event)
                     cleanupAfterTask()
                 }
@@ -357,7 +409,7 @@ class TaskFlowController(
                     uiState.isTaskRunning.value = true
                     if (!event.toolName.contains("Finish", ignoreCase = true)) {
                         removeTypingIndicator()
-                        addRunningToolStep(event.toolName, System.currentTimeMillis())
+                        addRunningToolStep(event.toolName, System.currentTimeMillis(), event.params)
                     }
                 }
                 is TaskEvent.ToolResult -> {
@@ -393,6 +445,27 @@ class TaskFlowController(
                     uiState.isTaskRunning.value = true
                     addSystem(event.description)
                 }
+                is TaskEvent.ReplayStart -> {
+                    uiState.isAwaitingReply.value = false
+                    uiState.isTaskRunning.value = true
+                    removeTypingIndicator()
+                    activeReplayGroupIndex = null
+                    addSystem("▶️ Replaying skill \"${event.skillTitle}\" (${event.totalSteps} steps)")
+                    ensureReplayGroupIndex()
+                }
+                is TaskEvent.ReplayConfirmRequest -> {
+                    uiState.isAwaitingReply.value = false
+                    uiState.isTaskRunning.value = true
+                    removeTypingIndicator()
+                    uiState.skillSaveOverlayState.value = SkillSaveOverlayState.OfferReplay(
+                        event.skill, event.template, event.extractedParams
+                    )
+                }
+                is TaskEvent.ReplayStep -> {
+                    uiState.isAwaitingReply.value = false
+                    uiState.isTaskRunning.value = true
+                    addReplayStepResult(event)
+                }
                 is TaskEvent.LoopStart -> {
                     uiState.isAwaitingReply.value = false
                     uiState.isTaskRunning.value = true
@@ -411,22 +484,56 @@ class TaskFlowController(
         }
     }
 
-    private fun replaceTypingIndicator(text: String, actualModelName: String? = null) {
+    private fun replaceTypingIndicator(
+        text: String,
+        actualModelName: String? = null,
+        recordingId: String? = null,
+        taskStatus: TaskStatus? = null
+    ) {
         val modelTag = actualModelName
             ?: uiState.modelStatus.value.removePrefix("● ").split(" ·").firstOrNull()?.trim()
             ?: ""
         val idx = uiState.messages.indexOfLast { it.role == ChatMessage.Role.ASSISTANT && it.content == "..." }
         if (idx >= 0) {
-            uiState.messages[idx] = ChatMessage(ChatMessage.Role.ASSISTANT, text, modelName = modelTag)
+            uiState.messages[idx] = ChatMessage(
+                ChatMessage.Role.ASSISTANT, text, modelName = modelTag, recordingId = recordingId, taskStatus = taskStatus
+            )
         } else {
-            uiState.messages.add(ChatMessage(ChatMessage.Role.ASSISTANT, text, modelName = modelTag))
+            uiState.messages.add(
+                ChatMessage(
+                    ChatMessage.Role.ASSISTANT, text, modelName = modelTag, recordingId = recordingId, taskStatus = taskStatus
+                )
+            )
         }
         onPersistConversation()
     }
 
+    /**
+     * Recording for the task that is ending right now. Read here rather than passed through
+     * TaskEvent.Completed because the orchestrator emits that event from six different call sites;
+     * the coordinator already knows the answer and clears it on the next arm().
+     */
+    private fun currentRecordingId(): String? =
+        io.agents.bqaagent.recording.TaskRecordingCoordinator.currentTaskRecordingId()
+
     private fun removeTypingIndicator() {
         val idx = uiState.messages.indexOfLast { it.role == ChatMessage.Role.ASSISTANT && it.content == "..." }
         if (idx >= 0) uiState.messages.removeAt(idx)
+    }
+
+    /**
+     * Drop the tool/LLM-step group accumulated during the current turn. Used for chat-only turns
+     * routed through the AgentLoop: they emit TokenUpdate steps like a real task, but chat must
+     * render as a single reply bubble (parity with the small-talk fast path), so the group goes.
+     */
+    private fun removeCurrentToolGroup() {
+        val index = activeToolGroupIndex
+        if (index != null && index in uiState.messages.indices &&
+            uiState.messages[index].role == ChatMessage.Role.TOOL_GROUP
+        ) {
+            uiState.messages.removeAt(index)
+        }
+        activeToolGroupIndex = null
     }
 
     private fun cleanupAfterTask() {
@@ -485,18 +592,22 @@ class TaskFlowController(
 
     private fun resetStepTimeline() {
         activeToolGroupIndex = null
+        activeReplayGroupIndex = null
         loopStartedAt.clear()
         lastTotalTokens = 0
         lastEstimatedCostUsd = 0.0
+        // A new task drops the previous task's in-memory save prompt (current-task only).
+        clearSkillSavePrompt()
     }
 
-    private fun addRunningToolStep(toolName: String, startedAt: Long) {
+    private fun addRunningToolStep(toolName: String, startedAt: Long, params: String = "") {
         updateToolGroup { steps ->
             steps + ToolStep(
                 toolName = toolName,
                 summary = "Running",
                 success = false,
                 startedAt = startedAt,
+                params = params.takeIf { it.isNotBlank() },
             )
         }
     }
@@ -554,6 +665,8 @@ class TaskFlowController(
         if (event.totalTokens > 0) lastTotalTokens = event.totalTokens
         if (event.estimatedCostUsd > 0.0) lastEstimatedCostUsd = event.estimatedCostUsd
 
+        val intentText = event.intent.trim()
+
         updateToolGroup { steps ->
             steps + ToolStep(
                 toolName = "LLM Call",
@@ -570,6 +683,7 @@ class TaskFlowController(
                 },
                 costText = deltaCost.takeIf { it > 0.0 }?.let { formatCost(it) },
                 isLlmCall = true,
+                intent = intentText.takeIf { it.isNotBlank() },
             )
         }
     }
@@ -603,7 +717,53 @@ class TaskFlowController(
         return insertIndex
     }
 
+    private fun ensureReplayGroupIndex(): Int {
+        activeReplayGroupIndex?.let { index ->
+            if (index in uiState.messages.indices && uiState.messages[index].role == ChatMessage.Role.TOOL_GROUP) {
+                return index
+            }
+        }
+        val insertIndex = uiState.messages.size
+        uiState.messages.add(
+            ChatMessage(
+                role = ChatMessage.Role.TOOL_GROUP,
+                content = "",
+                toolSteps = emptyList(),
+                groupTitle = "Replay steps",
+            )
+        )
+        activeReplayGroupIndex = insertIndex
+        return insertIndex
+    }
+
+    private fun addReplayStepResult(event: TaskEvent.ReplayStep) {
+        val now = System.currentTimeMillis()
+        updateReplayGroup { steps ->
+            steps + ToolStep(
+                toolName = "${event.step}/${event.total} ${event.name}",
+                summary = event.detail.ifBlank { if (event.success) "Done" else "Failed" }.take(120),
+                success = event.success,
+                startedAt = (now - event.durationMs).coerceAtLeast(0L),
+                completedAt = now,
+                durationMs = event.durationMs,
+                params = event.params.takeIf { it.isNotBlank() },
+            )
+        }
+    }
+
+    private fun updateReplayGroup(transform: (List<ToolStep>) -> List<ToolStep>) {
+        val index = ensureReplayGroupIndex()
+        val existing = uiState.messages[index]
+        val updatedSteps = transform(existing.toolSteps.orEmpty())
+        uiState.messages[index] = existing.copy(
+            content = buildToolGroupContent(updatedSteps),
+            toolSteps = updatedSteps,
+        )
+        onPersistConversation()
+    }
+
     private fun buildToolGroupContent(steps: List<ToolStep>): String {
+
         return steps.joinToString("\n") { step ->
             val status = if (step.success) "✓" else if (step.completedAt == null) "…" else "✕"
             val duration = step.durationMs?.toString().orEmpty()
@@ -611,7 +771,10 @@ class TaskFlowController(
             val tokens = step.tokenCount?.toString().orEmpty()
             val tokenText = step.tokenText.orEmpty()
             val costText = step.costText.orEmpty()
-            "- $status ${step.toolName} | started=${step.startedAt} | completed=$completed | durationMs=$duration | tokens=$tokens | tokenText=$tokenText | cost=$costText | llm=${step.isLlmCall} | ${step.summary}"
+            val safeSummary = step.summary.replace("\n", " ").replace("|", "·")
+            val safeIntent = step.intent.orEmpty().replace("\n", " ").replace("|", "·")
+            val safeParams = step.params.orEmpty().replace("\n", " ").replace("|", "·")
+            "- $status ${step.toolName} | started=${step.startedAt} | completed=$completed | durationMs=$duration | tokens=$tokens | tokenText=$tokenText | cost=$costText | llm=${step.isLlmCall} | params=$safeParams | intent=$safeIntent | $safeSummary"
         }
     }
 
@@ -635,8 +798,185 @@ class TaskFlowController(
         activity.startActivity(Intent(activity, SettingsActivity::class.java))
     }
 
+    // ==================== Skill save overlay ====================
+
+    fun showSkillSaveDetail() {
+        val state = uiState.skillSaveOverlayState.value as? SkillSaveOverlayState.OfferSave ?: return
+        val saveData = state.saveData
+        // Cap ONLY new-skill creation, and check it here — the moment Save is tapped — so the user
+        // is told before the detail/review screen instead of after confirming. Updating an existing
+        // skill's template (matchedSkill != null) is never blocked.
+        if (saveData.matchedSkill == null) {
+            val currentSkillCount = SkillStore.getAllSkills().size
+            if (currentSkillCount >= MAX_SKILLS) {
+                uiState.skillSaveOverlayState.value =
+                    SkillSaveOverlayState.SkillLimitReached(currentSkillCount, MAX_SKILLS, saveData)
+                return
+            }
+        }
+        val title = skillSaveInitialTitle(saveData)
+        uiState.skillSaveOverlayState.value = SkillSaveOverlayState.ShowDetail(saveData, title)
+    }
+
+    fun updateSkillSaveTitle(title: String) {
+        val state = uiState.skillSaveOverlayState.value as? SkillSaveOverlayState.ShowDetail ?: return
+        uiState.skillSaveOverlayState.value = state.copy(editableTitle = title)
+    }
+
+    fun dismissSkillSave() {
+        val state = uiState.skillSaveOverlayState.value
+        // Cancel on the skill-limit dialog restores the inline "Save as Skill?" prompt (keeping the
+        // recording) so the user can prune skills and tap Save again; it does NOT drop the offer.
+        if (state is SkillSaveOverlayState.SkillLimitReached) {
+            uiState.skillSaveOverlayState.value = SkillSaveOverlayState.OfferSave(state.saveData)
+            XLog.i(TAG, "Skill limit dialog cancelled — restored OfferSave prompt")
+            return
+        }
+        uiState.skillSaveOverlayState.value = SkillSaveOverlayState.Hidden
+        if (state is SkillSaveOverlayState.OfferReplay) {
+            XLog.i(TAG, "Replay declined by user — orchestrator degrades to agent loop")
+            appViewModel.resolveReplayConfirm(false)
+            return
+        }
+        XLog.i(TAG, "Skill save dismissed, in-memory save data discarded")
+    }
+
+    /**
+     * Jump from the skill-limit dialog to Skill Management: restore the inline OfferSave prompt
+     * first (so it is still there when the user returns after deleting skills), then open the manager.
+     */
+    fun openSkillManagementFromLimit() {
+        val state = uiState.skillSaveOverlayState.value as? SkillSaveOverlayState.SkillLimitReached ?: return
+        uiState.skillSaveOverlayState.value = SkillSaveOverlayState.OfferSave(state.saveData)
+        activity.startActivity(Intent(activity, SkillManagerActivity::class.java))
+    }
+
+    /**
+     * Drop the in-memory skill-save prompt. Save offers are current-task only and are never
+     * persisted, so starting a new task or switching conversation clears them. A blocking
+     * OfferReplay (pre-replay confirmation) is intentionally left untouched.
+     */
+    fun clearSkillSavePrompt() {
+        if (uiState.skillSaveOverlayState.value !is SkillSaveOverlayState.OfferReplay) {
+            uiState.skillSaveOverlayState.value = SkillSaveOverlayState.Hidden
+        }
+    }
+
+    fun confirmSkillSave() {
+        val currentState = uiState.skillSaveOverlayState.value
+        if (currentState is SkillSaveOverlayState.OfferReplay) {
+            uiState.skillSaveOverlayState.value = SkillSaveOverlayState.Hidden
+            XLog.i(TAG, "Replay confirmed by user for skill ${currentState.skill.skillId}")
+            appViewModel.resolveReplayConfirm(true)
+            return
+        }
+        val state = currentState as? SkillSaveOverlayState.ShowDetail ?: return
+        val matchedSkill = state.saveData.matchedSkill
+        uiState.skillSaveOverlayState.value = SkillSaveOverlayState.Saving(isTemplateOnly = matchedSkill != null)
+        executor.submit {
+            try {
+                val session = state.saveData.recordingSession
+                val savedTitle: String
+                if (matchedSkill != null) {
+                    // Scenario 2: skill already exists, persist the template only after user
+                    // confirmation. A degraded template is removed and rebuilt in place now,
+                    // so declining keeps the old template untouched.
+                    val degradedId = state.saveData.degradedTemplateId
+                    if (degradedId != null) {
+                        SkillStore.removeTemplate(matchedSkill.skillId, degradedId)
+                    }
+                    val built = SkillTemplateBuilder.buildTemplate(matchedSkill, session)
+                    val template = if (degradedId != null) built.copy(templateId = degradedId) else built
+                    SkillStore.saveTemplate(template)
+                    SkillGovernor.enforceTemplateLimit(matchedSkill.skillId)
+                    savedTitle = matchedSkill.title
+                    XLog.i(TAG, "Template saved after confirmation: ${template.templateId} (skill=${matchedSkill.skillId})")
+                } else {
+                    // Scenario 1: everything is derived from the recording — no LLM
+                    // analysis is required to persist a new skill. The skill-count cap is
+                    // enforced earlier in showSkillSaveDetail() (when Save is tapped), so a
+                    // NEW-skill save never reaches here while over the limit.
+                    val now = System.currentTimeMillis()
+                    val resolvedTitle = state.editableTitle.trim()
+                        .ifBlank { defaultTitleFromTaskText(state.saveData.originalTaskText) }
+                        .take(SkillDefinition.SKILL_TITLE_MAX_LENGTH)
+                        .trim()
+                    val skill = SkillDefinition(
+                        skillId = "skill_" + UUID.randomUUID().toString().replace("-", ""),
+                        title = resolvedTitle,
+                        originalTaskText = state.saveData.originalTaskText,
+                        createdAtMs = now,
+                        updatedAtMs = now
+                    )
+                    val template = SkillTemplateBuilder.buildTemplate(skill, session)
+                    SkillStore.saveSkill(skill)
+                    SkillStore.saveTemplate(template)
+                    SkillGovernor.enforceTemplateLimit(skill.skillId)
+                    savedTitle = skill.title
+                    XLog.i(TAG, "Skill saved: ${skill.skillId} (${skill.title}), template=${template.templateId}")
+                }
+                activity.runOnUiThread {
+                    uiState.skillSaveOverlayState.value =
+                        SkillSaveOverlayState.Success(savedTitle, isTemplateOnly = matchedSkill != null)
+                }
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (uiState.skillSaveOverlayState.value is SkillSaveOverlayState.Success) {
+                        uiState.skillSaveOverlayState.value = SkillSaveOverlayState.Hidden
+                    }
+                }, 1500)
+            } catch (e: Exception) {
+                XLog.e(TAG, "Skill save failed: ${e.message}", e)
+                activity.runOnUiThread {
+                    uiState.skillSaveOverlayState.value =
+                        SkillSaveOverlayState.Fail(e.message ?: "Save failed", state.saveData)
+                }
+            }
+        }
+    }
+
+    fun retrySkillSave() {
+        val state = uiState.skillSaveOverlayState.value as? SkillSaveOverlayState.Fail ?: return
+        val title = skillSaveInitialTitle(state.saveData)
+        uiState.skillSaveOverlayState.value = SkillSaveOverlayState.ShowDetail(state.saveData, title)
+    }
+
+    private fun skillSaveInitialTitle(saveData: SkillSaveData): String {
+        return saveData.matchedSkill?.title?.takeIf { it.isNotBlank() }
+            ?: defaultTitleFromTaskText(saveData.originalTaskText)
+    }
+
+    /**
+     * Derive a short default skill title from the raw task text: collapse
+     * whitespace, keep the full text when short enough, otherwise cut at the
+     * last sentence boundary (preferred) or word boundary within the limit
+     * and append an ellipsis. Always ≤ SKILL_TITLE_MAX_LENGTH. The full
+     * originalTaskText is preserved separately for exact-match recall.
+     */
+    private fun defaultTitleFromTaskText(taskText: String): String {
+        val collapsed = taskText.replace(Regex("\\s+"), " ").trim()
+        if (collapsed.length <= DEFAULT_TITLE_MAX_LENGTH) return collapsed
+        val window = collapsed.take(DEFAULT_TITLE_MAX_LENGTH)
+        val minCut = DEFAULT_TITLE_MAX_LENGTH / 2
+        val sentenceCut = window.indexOfLast { it in ".!?。！？" }
+        val wordCut = window.lastIndexOf(' ')
+        val cut = when {
+            sentenceCut >= minCut -> sentenceCut
+            wordCut >= minCut -> wordCut
+            else -> window.length
+        }
+        return window.substring(0, cut)
+            .trim()
+            .trimEnd(',', '，', ';', '；', ':', '：')
+            .trim() + "…"
+    }
+
     private fun buildAgentPromptOverride(rawTask: String): String? {
         if (ModelConfigRepository.snapshot().isLocalActive()) {
+            return null
+        }
+
+        if (KVUtils.isSkillCaptureModeEnabled()) {
+            XLog.i(TAG, "Skill Capture Mode: chat history omitted from agent prompt")
             return null
         }
 

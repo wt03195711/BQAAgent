@@ -28,13 +28,17 @@ object LocalAdbDeviceDriver {
     private const val TAG = "LocalAdbDeviceDriver"
     private const val DEFAULT_TIMEOUT_MS = 15_000L
     private const val SCREEN_TREE_CACHE_MAX_AGE_MS = 2_000L
-    private const val BAD_TREE_MIN_NODES = 3
+    private const val DETAIL_MAX_NODES = 250
 
     private val nodeIdMap = ConcurrentHashMap<String, UiNode>()
     private val nodeCounter = AtomicInteger(0)
     private val snapshotCounter = AtomicInteger(0)
     private val screenTreeCacheLock = Any()
     private var screenTreeCache: ScreenTreeCache? = null
+
+    /** Package the nodeIdMap was captured from; blank when unknown or empty. */
+    @Volatile
+    private var nodeMapPackage = ""
 
     private data class ScreenTreeCache(
         val createdAtMs: Long,
@@ -53,8 +57,7 @@ object LocalAdbDeviceDriver {
 
     private enum class ScreenInfoMode {
         COMPACT,
-        FORM,
-        ACTIONABLE,
+        DETAIL,
         TEXT,
         FULL;
 
@@ -71,7 +74,7 @@ object LocalAdbDeviceDriver {
         val packageName: String = "",
         val activityName: String = "",
         val nodeCount: Int = 0,
-        val outputChars: Int = 0,
+        val addressableCount: Int = 0,
     )
 
     private data class UiRow(
@@ -200,25 +203,31 @@ object LocalAdbDeviceDriver {
         return nodeIdMap[nodeId.replace("[", "").replace("]", "").trim()]
     }
 
-//    @JvmStatic
-//    @JvmOverloads
-//    fun findNodesByText(text: String, refresh: Boolean = true): List<UiNode> {
-//        val queries = splitQueries(text)
-//        if (queries.isEmpty()) return emptyList()
-//        val nodes = if (refresh || nodeIdMap.isEmpty()) {
-//            dumpNodes(assignIds = true)
-//        } else {
-//            currentMappedNodes()
-//        }
-//        return nodes.filter { node ->
-//            queries.any { query ->
-//                UiTextMatchUtils.matchesExactOrNormalized(node.text, query) ||
-//                    UiTextMatchUtils.matchesExactOrNormalized(node.contentDescription, query) ||
-//                    UiTextMatchUtils.matchesRelaxed(node.text, query) ||
-//                    UiTextMatchUtils.matchesRelaxed(node.contentDescription, query)
-//            }
-//        }
-//    }
+    /** Scrollable containers visible on the current screen, largest first. */
+    @JvmStatic
+    @JvmOverloads
+    fun findScrollableRegions(refresh: Boolean = false): List<UiNode> {
+        val nodes = if (refresh || nodeIdMap.isEmpty()) dumpNodes(assignIds = true) else currentMappedNodes()
+        return findScrollAreas(nodes)
+    }
+
+    /** Visible, meaningfully-sized scrollable containers (filters out tiny spinners). */
+    private fun findScrollAreas(nodes: List<UiNode>): List<UiNode> {
+        val size = screenSize()
+        val minArea = (size[0].toLong() * size[1] * 0.08f).toLong()
+        return nodes
+            .filter { it.scrollable && it.hasVisibleBounds() && it.bounds.width() >= 60 && it.bounds.height() >= 60 }
+            .filter { it.bounds.width().toLong() * it.bounds.height() >= minArea }
+            .sortedByDescending { it.bounds.width().toLong() * it.bounds.height() }
+            .take(3)
+    }
+
+    @JvmStatic
+    fun nodeMapPackage(): String = nodeMapPackage
+
+    /** Force a fresh uiautomator dump and rebuild nodeIdMap; returns all parsed nodes. */
+    @JvmStatic
+    fun refreshNodeMap(): List<UiNode> = dumpNodes(assignIds = true)
 
     @JvmStatic
     @JvmOverloads
@@ -431,9 +440,8 @@ object LocalAdbDeviceDriver {
         val startedAt = SystemClock.elapsedRealtime()
         val nodes = dumpNodes(assignIds = true)
         val snapshotId = "s${snapshotCounter.incrementAndGet()}"
-        val compactTree = buildCompactTree(nodes, snapshotId)
         val foreground = foregroundWindowFast()
-        val quality = assessDumpQuality(nodes, compactTree, foreground)
+        val quality = assessDumpQuality(nodes, foreground)
         synchronized(screenTreeCacheLock) {
             screenTreeCache = ScreenTreeCache(
                 createdAtMs = SystemClock.elapsedRealtime(),
@@ -473,6 +481,7 @@ object LocalAdbDeviceDriver {
         nodeIdMap.clear()
         nodeIdMap.putAll(cached.nodeMap)
         nodeCounter.set(cached.nodeMap.size)
+        nodeMapPackage = cached.foreground.packageName.ifBlank { cached.quality.packageName }
         val tree = renderScreenTree(cached.nodes, mode, cached.snapshotId, cached.quality)
         XLog.i(
             TAG,
@@ -519,8 +528,7 @@ object LocalAdbDeviceDriver {
         }
         return when (mode) {
             ScreenInfoMode.COMPACT -> buildCompactTree(nodes, snapshotId)
-            ScreenInfoMode.FORM -> buildFormTree(nodes, snapshotId)
-            ScreenInfoMode.ACTIONABLE -> buildActionableTree(nodes, snapshotId)
+            ScreenInfoMode.DETAIL -> buildDetailTree(nodes, snapshotId)
             ScreenInfoMode.TEXT -> buildTextTree(nodes, snapshotId)
             ScreenInfoMode.FULL -> buildFullTree(nodes, snapshotId, quality)
         }
@@ -528,7 +536,18 @@ object LocalAdbDeviceDriver {
 
     private fun buildHeader(mode: ScreenInfoMode, snapshotId: String, nodes: List<UiNode>): String {
         val packageName = nodes.firstOrNull { it.packageName.isNotBlank() }?.packageName.orEmpty()
-        return "snapshot=$snapshotId mode=${mode.name.lowercase()} package=${packageName.ifBlank { "unknown" }} nodes=${nodes.size}\n"
+        return buildString {
+            append("snapshot=").append(snapshotId)
+                .append(" mode=").append(mode.name.lowercase())
+                .append(" package=").append(packageName.ifBlank { "unknown" })
+                .append(" nodes=").append(nodes.size).append('\n')
+            val areas = findScrollAreas(nodes)
+            if (areas.isNotEmpty()) {
+                append("scroll_area: ")
+                    .append(areas.joinToString("; ") { "[${it.nodeId}] bounds=${it.bounds.toShortString()}" })
+                    .append(" (swipe gestures must start and end inside one of these areas)\n")
+            }
+        }
     }
 
     private fun buildQualityGateMessage(snapshotId: String, quality: DumpQuality): String {
@@ -538,24 +557,27 @@ object LocalAdbDeviceDriver {
             append(" package=").append(quality.packageName.ifBlank { "unknown" })
             append(" activity=").append(quality.activityName.ifBlank { "unknown" })
             append(" nodes=").append(quality.nodeCount)
-            append(" chars=").append(quality.outputChars)
+            append(" addressable=").append(quality.addressableCount)
             append('\n')
             append("Do not repeat get_screen_info without a state-changing action. Try wait, back, reopen the app, or finish with the limitation if the current app hides its UI tree.")
         }
     }
 
-    private fun assessDumpQuality(nodes: List<UiNode>, compactTree: String, foreground: ForegroundWindow): DumpQuality {
+    private fun assessDumpQuality(nodes: List<UiNode>, foreground: ForegroundWindow): DumpQuality {
         val packageName = nodes.firstOrNull { it.packageName.isNotBlank() }?.packageName.orEmpty()
             .ifBlank { foreground.packageName }
-        val outputChars = compactTree.lines()
-            .drop(1)
-            .joinToString("\n")
-            .trim()
-            .length
+        // Mode-independent usability signal (Fix A): a dump is usable as long as it
+        // exposes at least one addressable node (labelled / actionable / ProgressBar /
+        // resource-id bearing) that is not a pure structural container. Sparse-but-real
+        // screens (e.g. a dialog with 1-2 buttons) stay usable so the LLM can act on
+        // them; only genuinely blank or hidden dumps (0 addressable nodes) are gated to
+        // SCREEN_TREE_UNUSABLE -> VLM. Replaces the old node-count(<3) + compact-char
+        // heuristics that false-positived on valid sparse screens and were always
+        // measured against compact regardless of the mode actually requested.
+        val addressableCount = nodes.count { it.shouldExposeInCompact() && !it.isStructuralContainer() }
         val reason = when {
             nodes.isEmpty() -> "empty_nodes"
-            nodes.size < BAD_TREE_MIN_NODES -> "too_few_nodes"
-            outputChars <= 0 -> "empty_output"
+            addressableCount == 0 -> "no_addressable_content"
             else -> ""
         }
         val activityName = if (reason.isEmpty()) "" else foreground.activityName
@@ -565,28 +587,31 @@ object LocalAdbDeviceDriver {
             packageName = packageName,
             activityName = activityName,
             nodeCount = nodes.size,
-            outputChars = outputChars,
+            addressableCount = addressableCount,
         )
     }
 
     private fun foregroundWindowFast(): ForegroundWindow {
         val result = LocalAdbAutomation.exec(
-            "dumpsys window | grep -E 'mCurrentFocus|topResumedActivity' | head -n 1",
+            "dumpsys window | grep -E 'mCurrentFocus|topResumedActivity'",
             3_000L
         )
-        val raw = result.stdout
-            .lineSequence()
-            .firstOrNull()
-            ?.trim()
-            .orEmpty()
-        val component = Regex("([A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+)/([^\\s}]+)")
-            .findAll(raw)
-            .lastOrNull()
-            ?.value
-            .orEmpty()
-        val packageName = component.substringBefore('/', "").trim()
-        val activityName = component.substringAfter('/', "").trim()
-        return ForegroundWindow(packageName = packageName, activityName = activityName, raw = raw)
+        val componentRegex = Regex("([A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+)/([^\\s}]+)")
+        var firstRaw = ""
+        for (line in result.stdout.lineSequence()) {
+            val raw = line.trim()
+            if (raw.isEmpty()) continue
+            if (firstRaw.isEmpty()) firstRaw = raw
+            val component = componentRegex.findAll(raw).lastOrNull()?.value.orEmpty()
+            if (component.isNotEmpty()) {
+                return ForegroundWindow(
+                    packageName = component.substringBefore('/', "").trim(),
+                    activityName = component.substringAfter('/', "").trim(),
+                    raw = raw
+                )
+            }
+        }
+        return ForegroundWindow(packageName = "", activityName = "", raw = firstRaw)
     }
 
     private fun buildCompactTree(nodes: List<UiNode>, snapshotId: String): String {
@@ -596,34 +621,105 @@ object LocalAdbDeviceDriver {
             for ((index, row) in rows.withIndex()) {
                 val visibleNodes = row.nodes
                 if (visibleNodes.isEmpty()) continue
-                val labels = visibleNodes.mapNotNull { it.visibleLabel().takeIf { label -> label.isNotBlank() } }
-                    .distinct()
-                    .take(4)
-                val primary = visibleNodes.firstOrNull { it.isActionable() } ?: visibleNodes.first()
+                // Plan-A: every addressable element in the row gets its OWN node id + tap
+                // coordinates, so a row of buttons exposes button 1/2/3... individually
+                // instead of only the first actionable one.
+                val addressable = visibleNodes.filter { it.isActionable() || it.visibleLabel().isNotBlank() }
+                val targets = (if (addressable.isNotEmpty()) addressable else visibleNodes).take(8)
                 append("[row").append(index + 1).append("] ")
-                append("[").append(primary.nodeId).append("] ")
-                if (labels.isNotEmpty()) {
-                    append(labels.joinToString(" | ") { "\"${it.take(48)}${if (it.length > 48) ".." else ""}\"" })
-                } else {
-                    append(primary.classShortName())
+                targets.forEachIndexed { nodeIndex, node ->
+                    if (nodeIndex > 0) append("  ")
+                    val label = sanitizeLabel(node.enrichedLabel(nodes))
+                    append("[").append(node.nodeId).append("] ")
+                    if (label.isNotBlank()) {
+                        append('"').append(label.take(48)).append(if (label.length > 48) ".." else "").append('"')
+                    } else {
+                        append(node.classShortName())
+                    }
+                    append(node.flagsString())
+                    append(" tap=(").append(node.centerX).append(',').append(node.centerY).append(")")
                 }
-                append(primary.flagsString())
-                append(" tap=(").append(primary.centerX).append(',').append(primary.centerY).append(")")
                 append(" y=").append(row.top).append("..").append(row.bottom)
                 append('\n')
             }
         }
     }
 
-    private fun buildActionableTree(nodes: List<UiNode>, snapshotId: String): String {
+    private fun buildDetailTree(nodes: List<UiNode>, snapshotId: String): String {
+        val candidates = nodes
+            .filter { it.shouldExposeInCompact() && !it.isStructuralContainer() }
+            .sortedWith(compareBy<UiNode> { it.bounds.top }.thenBy { it.bounds.left })
+            .map { it to it.enrichedLabel(nodes) }
+        val deduped = dedupeDetailNodes(candidates).take(DETAIL_MAX_NODES)
         return buildString {
-            append(buildHeader(ScreenInfoMode.ACTIONABLE, snapshotId, nodes))
-            nodes.filter { it.isActionable() || it.className.contains("ProgressBar") }
-                .sortedWith(compareBy<UiNode> { it.bounds.top }.thenBy { it.bounds.left })
-                .forEach { node ->
-                    appendNodeLine(node, includeClass = false)
-                }
+            append(buildHeader(ScreenInfoMode.DETAIL, snapshotId, nodes))
+            for ((node, label) in deduped) {
+                appendNodeLine(
+                    node,
+                    includeClass = true,
+                    includeBounds = true,
+                    full = false,
+                    labelOverride = label,
+                )
+            }
         }
+    }
+
+    /**
+     * Detail-mode de-duplication (Fix 1 + Fix 4). HSBC-style screens nest 4-5 wrappers
+     * around ONE logical element and every clickable / resource-id-bearing wrapper
+     * passes the expose filter, so the raw dump renders the same button or account row
+     * several times at the same tap point.
+     *  - Fix 4: nodes with IDENTICAL bounds are one visual element -> keep a single
+     *    representative (prefer clickable, then resource-id, then a labelled one).
+     *  - Fix 1: an ancestor and a descendant carrying the SAME non-blank label are the
+     *    same element -> keep the better tap target (higher rank, else the outer one).
+     * Info children with their own bounds/labels (title / detail / amount TextViews)
+     * always survive, so no real content is lost.
+     */
+    private fun dedupeDetailNodes(items: List<Pair<UiNode, String>>): List<Pair<UiNode, String>> {
+        fun rank(node: UiNode): Int =
+            (if (node.clickable) 2 else 0) + (if (node.resourceId.isNotBlank()) 1 else 0)
+        fun area(node: UiNode): Long = node.bounds.width().toLong() * node.bounds.height().toLong()
+
+        // Fix 4: collapse identical-bounds stacks to one representative.
+        val byBounds = LinkedHashMap<String, MutableList<Pair<UiNode, String>>>()
+        for (item in items) {
+            val b = item.first.bounds
+            byBounds.getOrPut("${b.left},${b.top},${b.right},${b.bottom}") { mutableListOf() }.add(item)
+        }
+        val afterBounds = ArrayList<Pair<UiNode, String>>()
+        for (group in byBounds.values) {
+            if (group.size == 1) {
+                afterBounds.add(group[0])
+            } else {
+                val rep = group.maxWithOrNull(
+                    compareBy<Pair<UiNode, String>> { rank(it.first) }
+                        .thenBy { if (it.second.isNotBlank()) 1 else 0 }
+                ) ?: group[0]
+                afterBounds.add(rep)
+            }
+        }
+
+        // Fix 1: drop a node when a surviving node contains it with the SAME non-blank
+        // label and is an equal-or-better representative (higher rank, else larger/outer).
+        val result = ArrayList<Pair<UiNode, String>>()
+        for (candidate in afterBounds) {
+            val node = candidate.first
+            val label = candidate.second
+            val dominated = label.isNotBlank() && afterBounds.any { other ->
+                if (other === candidate) return@any false
+                val oNode = other.first
+                other.second == label &&
+                        oNode.bounds.contains(node.bounds) &&
+                        (rank(oNode) > rank(node) ||
+                                (rank(oNode) == rank(node) && area(oNode) >= area(node)))
+            }
+            if (!dominated) result.add(candidate)
+        }
+        return result.sortedWith(
+            compareBy<Pair<UiNode, String>> { it.first.bounds.top }.thenBy { it.first.bounds.left }
+        )
     }
 
     private fun buildTextTree(nodes: List<UiNode>, snapshotId: String): String {
@@ -642,42 +738,12 @@ object LocalAdbDeviceDriver {
         }
     }
 
-    private fun buildFormTree(nodes: List<UiNode>, snapshotId: String): String {
-        val sorted = nodes.sortedWith(compareBy<UiNode> { it.bounds.top }.thenBy { it.bounds.left })
-        val edits = sorted.filter { it.isEditable }
-        val buttons = sorted.filter { it.isActionable() && !it.isEditable && !it.isStructuralContainer() }
-        return buildString {
-            append(buildHeader(ScreenInfoMode.FORM, snapshotId, nodes))
-            if (edits.isNotEmpty()) {
-                append("Fields:\n")
-                edits.forEach { edit ->
-                    val label = nearestLabelFor(edit, sorted)
-                    append("[").append(edit.nodeId).append("] edit")
-                    if (label.isNotBlank()) append(" label=\"").append(label.take(80)).append('"')
-                    if (edit.visibleLabel().isNotBlank()) append(" value=\"").append(edit.visibleLabel().take(80)).append('"')
-                    append(" tap=(").append(edit.centerX).append(',').append(edit.centerY).append(")")
-                    append(" bounds=").append(edit.bounds.toShortString())
-                    append('\n')
-                }
-            }
-            val actionButtons = buttons.filter {
-                it.clickable || it.checkable || it.scrollable || it.visibleLabel().isNotBlank()
-            }.take(40)
-            if (actionButtons.isNotEmpty()) {
-                append("Actions:\n")
-                actionButtons.forEach { appendNodeLine(it, includeClass = false) }
-            }
-            if (edits.isEmpty() && actionButtons.isEmpty()) {
-                append(buildTextTree(nodes, snapshotId).lineSequence().drop(1).joinToString("\n"))
-            }
-        }
-    }
-
     private fun buildFullTree(nodes: List<UiNode>, snapshotId: String, quality: DumpQuality): String {
         return buildString {
             append(buildHeader(ScreenInfoMode.FULL, snapshotId, nodes))
             if (!quality.ok) {
-                append("quality=").append(quality.reason).append(" chars=").append(quality.outputChars).append('\n')
+                append("quality=").append(quality.reason).append(" addressable=").append(quality.addressableCount).append('\n')
+                // Deleted:append("quality=").append(quality.reason).append(" chars=").append(quality.outputChars).append('\n')
             }
             for (node in nodes) {
                 appendNodeLine(node, includeClass = true, includeBounds = true, full = true)
@@ -690,10 +756,11 @@ object LocalAdbDeviceDriver {
         includeClass: Boolean,
         includeBounds: Boolean = true,
         full: Boolean = false,
+        labelOverride: String? = null,
     ) {
         append("[").append(node.nodeId.ifBlank { "node" }).append("] ")
         if (includeClass) append(node.classShortName()).append(' ')
-        val label = node.visibleLabel()
+        val label = sanitizeLabel(labelOverride ?: node.visibleLabel())
         if (label.isNotBlank()) append('"').append(label.take(if (full) 200 else 80)).append(if (!full && label.length > 80) ".." else "").append("\" ")
         append(node.flagsString())
         append(" tap=(").append(node.centerX).append(',').append(node.centerY).append(")")
@@ -749,7 +816,56 @@ object LocalAdbDeviceDriver {
         }?.visibleLabel().orEmpty()
     }
 
+    /**
+     * Contained label for a nameless node, borrowed from its descendants ONLY when it
+     * is unambiguous. Mirrors the coordinate -> text attribution in
+     * SkillRecorder.lookupTextByCoordinate so the driver render and the recorded
+     * NodeLocator share ONE label algorithm.
+     *
+     * Fix 2: a container that wraps MULTIPLE different labels (e.g. a row holding
+     * "Add a new payee" + "All payees", or a tab pager holding all four tabs) is a
+     * GROUP, not a single element. Inheriting one arbitrary child's label misleads the
+     * LLM into tapping the wrong thing, so we only borrow the label when every labelled
+     * descendant agrees on ONE distinct value; otherwise return blank and let the render
+     * fall back to the class short name.
+     */
+    @JvmStatic
+    fun containedLabelFor(node: UiNode, nodes: List<UiNode>): String {
+        val distinct = nodes
+            .filter { it !== node && it.label.isNotBlank() && node.bounds.contains(it.bounds) }
+            .map { it.label.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        return if (distinct.size == 1) distinct[0] else ""
+    }
+
+    /**
+     * Best display label for a node: own text/desc first, then the smallest contained
+     * labelled descendant, then (for input fields) the nearest associated label.
+     * Returns blank when nothing meaningful is found; the caller applies its own
+     * fallback (resource-id / class short name).
+     */
+    private fun UiNode.enrichedLabel(nodes: List<UiNode>): String {
+        val self = visibleLabel()
+        if (self.isNotBlank()) return self
+        val contained = containedLabelFor(this, nodes)
+        if (contained.isNotBlank()) return contained
+        if (isEditable) {
+            val near = nearestLabelFor(this, nodes)
+            if (near.isNotBlank()) return near
+        }
+        return ""
+    }
+
     private fun UiNode.visibleLabel(): String = text.ifBlank { contentDescription }.trim()
+
+    /**
+     * Fix 3: collapse newlines / runs of whitespace in a label to single spaces so an
+     * accessibility description (e.g. HSBC's "Current Account\n[1, , 4, ...]") cannot
+     * break the one-node-per-line detail/compact format. Render-time only — the raw
+     * text used for replay matching (containedLabelFor / NodeLocator) stays untouched.
+     */
+    private fun sanitizeLabel(raw: String): String = raw.replace(Regex("\\s+"), " ").trim()
 
     private fun UiNode.classShortName(): String = className.substringAfterLast('.').ifBlank { "node" }
 
@@ -790,33 +906,6 @@ object LocalAdbDeviceDriver {
         return parseNodes(xml, assignIds)
     }
 
-//    private fun dumpWindowXml(timeoutMs: Long = DEFAULT_TIMEOUT_MS): String? {
-//        val dir = File(ClawApplication.instance.getExternalFilesDir(null), "uiautomator").apply { mkdirs() }
-//        val file = File(dir, "window_dump.xml")
-//        val quoted = shellQuote(file.absolutePath)
-//        val compressedStartedAt = SystemClock.elapsedRealtime()
-//        val compressedResult = LocalAdbAutomation.exec(
-//            "uiautomator dump --compressed $quoted >/dev/null 2>&1 && cat $quoted",
-//            timeoutMs
-//        )
-//        if (compressedResult.isSuccess && compressedResult.stdout.isNotBlank()) {
-//            val elapsed = SystemClock.elapsedRealtime() - compressedStartedAt
-//            XLog.i(TAG, "uiautomator dump compressed ok chars=${compressedResult.stdout.length} elapsed=${elapsed}ms")
-//            return compressedResult.stdout
-//        }
-//
-//        val plainStartedAt = SystemClock.elapsedRealtime()
-//        XLog.w(TAG, "uiautomator compressed dump failed, retrying plain: ${compressedResult.combinedOutput}")
-//        val result = LocalAdbAutomation.exec("uiautomator dump $quoted >/dev/null 2>&1 && cat $quoted", timeoutMs)
-//        if (!result.isSuccess || result.stdout.isBlank()) {
-//            XLog.w(TAG, "uiautomator dump failed: ${result.combinedOutput}")
-//            return null
-//        }
-//        val elapsed = SystemClock.elapsedRealtime() - plainStartedAt
-//        XLog.i(TAG, "uiautomator dump plain ok chars=${result.stdout.length} elapsed=${elapsed}ms")
-//        return result.stdout
-//    }
-
     /**
      * 升级为 UiAutomator2 --compressed 压缩抓取，无临时文件IO，速度更快、XML体积更小
      * Android 8.0+ 支持，低版本自动降级 v1 旧方案
@@ -849,39 +938,6 @@ object LocalAdbDeviceDriver {
         }
         return v1Result.stdout
     }
-
-//    private fun parseNodes(xml: String, assignIds: Boolean): List<UiNode> {
-//        return try {
-//            val startedAt = SystemClock.elapsedRealtime()
-//            if (assignIds) {
-//                nodeIdMap.clear()
-//                nodeCounter.set(0)
-//            }
-//            val factory = DocumentBuilderFactory.newInstance().apply {
-//                isNamespaceAware = false
-//                isValidating = false
-//                try {
-//                    setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-//                    setFeature("http://xml.org/sax/features/external-general-entities", false)
-//                    setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-//                } catch (_: Exception) {
-//                }
-//            }
-//            val doc = factory.newDocumentBuilder()
-//                .parse(xml.byteInputStream(Charsets.UTF_8))
-//            val result = mutableListOf<UiNode>()
-//            val filteredNodeCount = collectNodes(doc.documentElement, result, assignIds)
-//            val elapsed = SystemClock.elapsedRealtime() - startedAt
-//            XLog.i(
-//                TAG,
-//                "uiautomator XML parsed nodes=${result.size} filtered=$filteredNodeCount chars=${xml.length} elapsed=${elapsed}ms"
-//            )
-//            result
-//        } catch (e: Exception) {
-//            XLog.w(TAG, "Failed to parse uiautomator XML", e)
-//            emptyList()
-//        }
-//    }
 
     private fun parseNodes(xml: String, assignIds: Boolean): List<UiNode> {
         return try {
@@ -927,6 +983,9 @@ object LocalAdbDeviceDriver {
 
             val result = mutableListOf<UiNode>()
             val filteredNodeCount = collectNodes(doc.documentElement, result, assignIds)
+            if (assignIds) {
+                nodeMapPackage = result.firstOrNull { it.packageName.isNotBlank() }?.packageName ?: ""
+            }
             val elapsed = SystemClock.elapsedRealtime() - startedAt
             XLog.i(
                 TAG,
@@ -935,6 +994,9 @@ object LocalAdbDeviceDriver {
             result
         } catch (e: Exception) {
             XLog.w(TAG, "Failed to parse uiautomator XML", e)
+            if (assignIds) {
+                nodeMapPackage = ""
+            }
             emptyList()
         }
     }

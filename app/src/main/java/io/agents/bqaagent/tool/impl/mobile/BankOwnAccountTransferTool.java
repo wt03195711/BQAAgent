@@ -58,6 +58,11 @@ public class BankOwnAccountTransferTool extends BaseTool {
     }
 
     @Override
+    public List<String> getValueParamNames() {
+        return Arrays.asList("source_account", "destination_account", "debit_amount", "credit_amount");
+    }
+
+    @Override
     public String getDisplayName() {
         return "Bank Own Account Transfer";
     }

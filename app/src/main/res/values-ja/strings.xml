@@ -121,6 +121,8 @@
     <string name="cd_selected">選択済み</string>
     <string name="cd_task_success">タスク完了</string>
     <string name="cd_task_error">タスク失敗</string>
+    <string name="cd_task_stopped">タスク停止</string>
+    <string name="cd_task_cancelled">タスク取消</string>
     <string name="cd_channel_logo">チャネルロゴ</string>
     <string name="cd_empty_state">データなし</string>
     <string name="cd_error_state">読み込み失敗</string>

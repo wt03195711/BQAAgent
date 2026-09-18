@@ -11,6 +11,7 @@ import io.agents.bqaagent.tool.ToolResult;
 import io.agents.bqaagent.utils.XLog;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -25,6 +26,11 @@ public class FindAndTapTool extends BaseTool {
     @Override
     public String getName() {
         return "find_and_tap";
+    }
+
+    @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("text");
     }
 
     @Override

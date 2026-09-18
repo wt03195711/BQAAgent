@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import io.agents.bqaagent.R
+import io.agents.bqaagent.TaskStatus
 import io.agents.bqaagent.agent.skill.Skill
 import io.agents.bqaagent.agent.skill.SkillCategory
 import io.agents.bqaagent.agent.skill.SkillRegistry
@@ -55,6 +56,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.graphicsLayer
+import io.agents.bqaagent.BuildConfig
 import kotlinx.coroutines.launch
 import io.agents.bqaagent.agent.CloudProvider
 import io.agents.bqaagent.agent.llm.ModelConfigRepository
@@ -160,6 +162,14 @@ fun ChatScreen(
     showUserImageUpload: Boolean = false,
     onUploadImage: () -> Unit = {},
     onSkipImageUpload: () -> Unit = {},
+    skillSaveState: SkillSaveOverlayState = SkillSaveOverlayState.Hidden,
+    onOpenSkillSaveDetail: () -> Unit = {},
+    onDismissSkillSave: () -> Unit = {},
+    onSkillSaveTitleChanged: (String) -> Unit = {},
+    onConfirmSkillSave: () -> Unit = {},
+    onRetrySkillSave: () -> Unit = {},
+    /** Opens the player for the recording bound to a task result message. */
+    onOpenRecording: (String) -> Unit = {},
 ) {
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -324,6 +334,13 @@ fun ChatScreen(
                             colors = colors,
                             onBackgroundTap = dismissKeyboard,
                             modifier = Modifier.fillMaxSize(),
+                            skillSaveState = skillSaveState,
+                            onOpenSkillSaveDetail = onOpenSkillSaveDetail,
+                            onDismissSkillSave = onDismissSkillSave,
+                            onSkillSaveTitleChanged = onSkillSaveTitleChanged,
+                            onConfirmSkillSave = onConfirmSkillSave,
+                            onRetrySkillSave = onRetrySkillSave,
+                            onOpenRecording = onOpenRecording,
                         )
                     }
                 }
@@ -839,6 +856,13 @@ private fun MessageList(
     colors: PokeclawColors,
     onBackgroundTap: () -> Unit = {},
     modifier: Modifier = Modifier,
+    skillSaveState: SkillSaveOverlayState = SkillSaveOverlayState.Hidden,
+    onOpenSkillSaveDetail: () -> Unit = {},
+    onDismissSkillSave: () -> Unit = {},
+    onSkillSaveTitleChanged: (String) -> Unit = {},
+    onConfirmSkillSave: () -> Unit = {},
+    onRetrySkillSave: () -> Unit = {},
+    onOpenRecording: (String) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
     val lastMessage = messages.lastOrNull()
@@ -853,9 +877,18 @@ private fun MessageList(
         ).joinToString("|")
     }.orEmpty()
 
-    LaunchedEffect(messages.size, lastMessageScrollKey) {
+    // Current-task-only skill-save prompt rendered as a footer card below the latest
+    // result. ONLY the initial "Save as Skill?" prompt renders inline; every later
+    // phase (ShowDetail/Saving/Success/Fail) and OfferReplay stay full-screen modals
+    // handled by the Activity.
+    val inlineSaveVisible = skillSaveState is SkillSaveOverlayState.OfferSave
+    // Index of the trailing spacer item. Scrolling here bottoms out the list so the result
+    // message AND the save card below it are both visible (equals old behavior when no card).
+    val lastItemIndex = messages.size + (if (inlineSaveVisible) 1 else 0)
+
+    LaunchedEffect(messages.size, lastMessageScrollKey, inlineSaveVisible) {
         if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size)
+            listState.animateScrollToItem(lastItemIndex)
         }
     }
 
@@ -872,9 +905,27 @@ private fun MessageList(
             val message = messages[index]
             when (message.role) {
                 ChatMessage.Role.USER -> UserBubble(message.content, message.timestamp, colors)
-                ChatMessage.Role.ASSISTANT -> AssistantBubble(message.content, message.timestamp, colors, message.modelName)
+                ChatMessage.Role.ASSISTANT -> AssistantBubble(
+                    text = message.content,
+                    timestamp = message.timestamp,
+                    colors = colors,
+                    modelName = message.modelName,
+                    recordingId = message.recordingId,
+                    taskStatus = message.taskStatus,
+                    onOpenRecording = onOpenRecording,
+                )
                 ChatMessage.Role.SYSTEM -> SystemMessage(message.content, colors)
                 ChatMessage.Role.TOOL_GROUP -> ToolGroup(message, colors)
+            }
+        }
+        if (inlineSaveVisible) {
+            item {
+                InlineSkillSaveCard(
+                    state = skillSaveState,
+                    colors = colors,
+                    onOpenDetail = onOpenSkillSaveDetail,
+                    onDismiss = onDismissSkillSave,
+                )
             }
         }
         item {
@@ -1112,7 +1163,15 @@ private fun UserBubble(text: String, timestamp: Long, colors: PokeclawColors) {
 }
 
 @Composable
-private fun AssistantBubble(text: String, timestamp: Long, colors: PokeclawColors, modelName: String? = null) {
+private fun AssistantBubble(
+    text: String,
+    timestamp: Long,
+    colors: PokeclawColors,
+    modelName: String? = null,
+    recordingId: String? = null,
+    taskStatus: TaskStatus? = null,
+    onOpenRecording: (String) -> Unit = {},
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1152,16 +1211,28 @@ private fun AssistantBubble(text: String, timestamp: Long, colors: PokeclawColor
                         shape = CompactSurfaceShape,
                         border = androidx.compose.foundation.BorderStroke(0.5.dp, colors.aiBubbleBorder),
                     ) {
-                        Text(
-                            text = text,
-                            color = colors.aiText,
-                            fontSize = 15.sp,
-                            lineHeight = 21.sp,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        )
+                        Column {
+                            if (taskStatus != null) {
+                                TaskStatusHeader(status = taskStatus, colors = colors)
+                            }
+                            Text(
+                                text = text,
+                                color = colors.aiText,
+                                fontSize = 15.sp,
+                                lineHeight = 21.sp,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            )
+                        }
                     }
                 }
             }
+        }
+        if (!recordingId.isNullOrBlank() && text != "...") {
+            RecordingChip(
+                recordingId = recordingId,
+                colors = colors,
+                onOpen = { onOpenRecording(recordingId) },
+            )
         }
         if (text != "...") {
             val footer = listOfNotNull(
@@ -1173,6 +1244,75 @@ private fun AssistantBubble(text: String, timestamp: Long, colors: PokeclawColor
                 fontSize = 9.sp,
                 color = colors.textTertiary,
                 modifier = Modifier.padding(start = 40.dp, top = 1.dp, bottom = 2.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun TaskStatusHeader(status: TaskStatus, colors: PokeclawColors) {
+    val (icon, tint, label) = when (status) {
+        TaskStatus.SUCCESS -> Triple(Icons.Filled.CheckCircle, Color(0xFF4ADE80), "Task succeeded")
+        TaskStatus.FAILED -> Triple(Icons.Filled.Cancel, Color(0xFFF87171), "Task failed")
+        TaskStatus.STOPPED -> Triple(Icons.Filled.StopCircle, Color(0xFFFBBF24), "Task stopped")
+        TaskStatus.CANCELLED -> Triple(Icons.Filled.DoNotDisturb, colors.textTertiary, "Task cancelled")
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(start = 14.dp, top = 10.dp, end = 14.dp, bottom = 8.dp),
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(15.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(text = label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = tint)
+    }
+    HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+}
+
+/**
+ * Entry point from a task result message to its screen recording.
+ *
+ * Renders unconditionally — it does NOT check whether the folder still exists. Retention drops the
+ * oldest recordings once the 800MB cap is reached and the user can delete one from the manager, so a
+ * synchronous exists() check here would run disk I/O on every recomposition of every message and
+ * still be stale by the time it is tapped. The player resolves the id and explains what happened.
+ */
+@Composable
+private fun RecordingChip(
+    recordingId: String,
+    colors: PokeclawColors,
+    onOpen: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .padding(start = 40.dp, top = 4.dp)
+            .clickable(onClick = onOpen),
+        shape = CompactSurfaceShape,
+        color = colors.surface,
+        border = androidx.compose.foundation.BorderStroke(0.5.dp, colors.inputBorder),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Default.Videocam,
+                contentDescription = null,
+                tint = colors.accent,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = "View recording",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.textSecondary,
+            )
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = colors.textTertiary,
+                modifier = Modifier.size(12.dp),
             )
         }
     }
@@ -1263,7 +1403,7 @@ private fun ToolGroup(message: ChatMessage, colors: PokeclawColors) {
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    "Execution steps",
+                    message.groupTitle ?: "Execution steps",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = colors.textSecondary,
@@ -1351,13 +1491,27 @@ private fun StepTimelineRow(step: ToolStep, isLast: Boolean, colors: PokeclawCol
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (BuildConfig.DEBUG && !step.params.isNullOrBlank()) {
+                Text(
+                    "Params: ${step.params}",
+                    fontSize = 10.sp,
+                    color = colors.textTertiary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             if (step.summary.isNotBlank()) {
                 Text(
                     step.summary,
                     fontSize = 11.sp,
                     color = colors.textTertiary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (!step.intent.isNullOrBlank()) {
+                Text(
+                    "Intent: ${step.intent}",
+                    fontSize = 11.sp,
+                    color = colors.textSecondary,
                 )
             }
         }
@@ -1430,7 +1584,18 @@ private fun parseToolStepsFromContent(content: String, fallbackTimestamp: Long):
                 ?.removePrefix("llm=")
                 ?.toBooleanStrictOrNull()
                 ?: title.equals("LLM Call", ignoreCase = true)
-            val summary = parts.lastOrNull()?.takeIf { !it.startsWith("started=") && !it.startsWith("duration=") }?.trim().orEmpty()
+            val intent = parts.firstOrNull { it.startsWith("intent=") }
+                ?.removePrefix("intent=")
+                ?.takeIf { it.isNotBlank() }
+            val params = parts.firstOrNull { it.startsWith("params=") }
+                ?.removePrefix("params=")
+                ?.takeIf { it.isNotBlank() }
+            var summary = parts.lastOrNull()?.takeIf { !it.startsWith("started=") && !it.startsWith("duration=") && !it.startsWith("intent=") }?.trim().orEmpty()
+            var resolvedIntent = intent
+            if (resolvedIntent == null && " · Intent: " in summary) {
+                resolvedIntent = summary.substringAfter(" · Intent: ").trim().takeIf { it.isNotBlank() }
+                summary = summary.substringBefore(" · Intent: ").trim()
+            }
             ToolStep(
                 toolName = title,
                 summary = summary,
@@ -1442,6 +1607,8 @@ private fun parseToolStepsFromContent(content: String, fallbackTimestamp: Long):
                 tokenText = tokenText,
                 costText = costText,
                 isLlmCall = isLlmCall,
+                intent = resolvedIntent,
+                params = params,
             )
         } else {
             val name = body.substringBefore("→").trim()
@@ -1899,7 +2066,11 @@ private fun DownloadOverlay(progress: Int, colors: PokeclawColors) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(colors.background.copy(alpha = 0.95f)),
+            .background(colors.background.copy(alpha = 0.95f))
+            .clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null,
+            ) { /* block pass-through taps while the blocking download overlay is up */ },
         contentAlignment = Alignment.Center,
     ) {
         Card(
@@ -2429,6 +2600,14 @@ private fun SidebarContent(
             "Recent",
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
+            color = colors.textTertiary,
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 4.dp),
+        )
+
+        // Capacity + ordering + auto-cleanup hint (kept short on purpose).
+        Text(
+            "${conversations.size}/${ChatHistoryManager.MAX_CONVERSATIONS} · oldest auto-removed when full",
+            fontSize = 11.sp,
             color = colors.textTertiary,
             modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
         )

@@ -172,4 +172,44 @@
 
     </androidx.cardview.widget.CardView>
 
+    <!-- 任务停止状态（系统规则/权限中止） -->
+    <androidx.cardview.widget.CardView
+        android:id="@+id/cardStopped"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:cardCornerRadius="4dp"
+        app:cardElevation="4dp"
+        app:cardBackgroundColor="@color/colorWarningPrimary"
+        android:visibility="gone">
+
+        <ImageView
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:layout_gravity="center"
+            android:contentDescription="@string/cd_task_stopped"
+            android:src="@drawable/ic_stop"
+            app:tint="@color/colorWarningOnPrimary" />
+
+    </androidx.cardview.widget.CardView>
+
+    <!-- 任务取消状态（用户主动取消） -->
+    <androidx.cardview.widget.CardView
+        android:id="@+id/cardCancelled"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:cardCornerRadius="4dp"
+        app:cardElevation="4dp"
+        app:cardBackgroundColor="@color/colorCancelledPrimary"
+        android:visibility="gone">
+
+        <ImageView
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:layout_gravity="center"
+            android:contentDescription="@string/cd_task_cancelled"
+            android:src="@drawable/ic_close"
+            app:tint="@color/colorCancelledOnPrimary" />
+
+    </androidx.cardview.widget.CardView>
+
 </FrameLayout>

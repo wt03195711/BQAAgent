@@ -17,6 +17,7 @@ import io.agents.bqaagent.tool.ToolParameter;
 import io.agents.bqaagent.tool.ToolResult;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -27,6 +28,11 @@ public class ClipboardTool extends BaseTool {
     @Override
     public String getName() {
         return "clipboard";
+    }
+
+    @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("text");
     }
 
     @Override

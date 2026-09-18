@@ -9,6 +9,7 @@ import io.agents.bqaagent.tool.ToolParameter;
 import io.agents.bqaagent.tool.ToolResult;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -17,6 +18,11 @@ public class OpenUrlTool extends BaseTool {
     @Override
     public String getName() {
         return "open_url";
+    }
+
+    @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("url");
     }
 
     @Override

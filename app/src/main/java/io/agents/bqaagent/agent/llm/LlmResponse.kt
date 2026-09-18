@@ -11,7 +11,9 @@ data class LlmResponse(
     val toolExecutionRequests: List<ToolExecutionRequest>,
     val tokenUsage: TokenUsage? = null,
     /** The actual model name returned by the API (e.g. "deepseek-v4-flash"). */
-    val modelName: String? = null
+    val modelName: String? = null,
+    /** Reasoning content from reasoning models (OpenAI-compatible "reasoning_content" or langchain4j thinking). */
+    val reasoningText: String? = null
 ) {
     fun hasToolExecutionRequests(): Boolean = toolExecutionRequests.isNotEmpty()
 }

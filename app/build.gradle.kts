@@ -53,8 +53,8 @@ android {
         applicationId = "io.agents.bqaagent"
         minSdk = 28
         targetSdk = 36
-        versionCode = readLocalOrEnvInt("BQAAGENT_VERSION_CODE", 1)
-        versionName = readLocalOrEnvString("BQAAGENT_VERSION_NAME", "0.0.1")
+        versionCode = readLocalOrEnvInt("BQAAGENT_VERSION_CODE", 2)
+        versionName = readLocalOrEnvString("BQAAGENT_VERSION_NAME", "0.0.2")
         buildConfigField("String", "VERSION_INFO", getVersionGit())
         buildConfigField("String", "APP_ORIGIN", "\"BQAAgent by agents.io | github.com/agents-io/BQAAgent\"")
         buildConfigField("String", "BUILD_FINGERPRINT", "\"${getBuildFingerprint()}\"")
@@ -138,6 +138,7 @@ dependencies {
     implementation(libs.glide)
     implementation(libs.glide.transformations)
     implementation(libs.easyfloat)
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
 
 
     // Jetpack Compose
@@ -158,6 +159,11 @@ dependencies {
     implementation(libs.nanohttpd)
     implementation(libs.kadb)
     implementation(libs.kotlinx.coroutines.android)
+
+    // Seamless multi-segment playback of task recordings: one continuous timeline across the
+    // ~2-minute segments, with the overlap-rotation duplicate frames clipped out per item.
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.ui)
 }
 
 tasks.register("injectBuildFingerprint") {

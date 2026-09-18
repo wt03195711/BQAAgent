@@ -31,11 +31,16 @@ import io.agents.bqaagent.widget.AlertDialog
 import io.agents.bqaagent.widget.ConfirmDialog
 import io.agents.bqaagent.widget.CommonToolbar
 import io.agents.bqaagent.widget.LocalAdbSetupDialog
+import io.agents.bqaagent.widget.LoadingDialog
 import io.agents.bqaagent.widget.MenuGroup
 import io.agents.bqaagent.widget.MenuItem
 import io.agents.bqaagent.AppCapabilityCoordinator
 import io.agents.bqaagent.AppRequirement
+import io.agents.bqaagent.ServiceBindingState
 import io.agents.bqaagent.appViewModel
+import io.agents.bqaagent.recording.RecordingSelfTest
+import io.agents.bqaagent.recording.TaskRecordingCoordinator
+import io.agents.bqaagent.recording.TaskRecordingStore
 import io.agents.bqaagent.server.ConfigServerManager
 import io.agents.bqaagent.service.ForegroundService
 import io.agents.bqaagent.support.DebugReportManager
@@ -58,6 +63,7 @@ class SettingsActivity : BaseActivity() {
     private val permPoller = object : Runnable {
         override fun run() {
             refreshPermissions()
+            updateTaskRecordingLabel()
             handler.postDelayed(this, 1000)
         }
     }
@@ -73,6 +79,9 @@ class SettingsActivity : BaseActivity() {
     private var languageItem: io.agents.bqaagent.widget.MenuItem? = null
     private var voiceInputItem: io.agents.bqaagent.widget.MenuItem? = null
     private var sensitiveModeItem: io.agents.bqaagent.widget.MenuItem? = null
+    private var skillCaptureModeItem: io.agents.bqaagent.widget.MenuItem? = null
+    private var taskRecordingItem: io.agents.bqaagent.widget.MenuItem? = null
+    private var recordingFilesItem: io.agents.bqaagent.widget.MenuItem? = null
     private var localAdbSetupOpening = false
     private var localAdbSetupDialog: LocalAdbSetupDialog? = null
     private var localAdbRefreshOnResume = false
@@ -126,6 +135,8 @@ class SettingsActivity : BaseActivity() {
         refreshExternalAutomation()
         refreshVoiceInput()
         refreshSensitiveMode()
+        refreshSkillCaptureMode()
+        refreshTaskRecording()
         handler.removeCallbacks(permPoller)
         handler.postDelayed(permPoller, 1000)
         localAdbRefreshOnResume = false
@@ -183,6 +194,276 @@ class SettingsActivity : BaseActivity() {
         )
     }
 
+    private fun refreshSkillCaptureMode() {
+        skillCaptureModeItem?.setTrailingText(
+            if (KVUtils.isSkillCaptureModeEnabled()) "Enabled" else "Disabled"
+        )
+    }
+
+    /**
+     * Cheap, main-thread-safe status label for the Task Recording row. Reflects the live Local ADB
+     * state so a wireless disconnect immediately shows the switch is blocked instead of a stale
+     * "Enabled". Polled every second by [permPoller] alongside the ADB row; deliberately does NO
+     * disk I/O — the recordings summary lives in [refreshTaskRecording].
+     */
+    private fun updateTaskRecordingLabel() {
+        val enabled = KVUtils.isTaskRecordingEnabled()
+        // DEGRADED ("Disconnected") / DISABLED (no host+port) are definitive down states. CONNECTING
+        // is a transient probe — isReady() returns it whenever the 15s cache is stale (e.g. right
+        // after onResume) — so treating it as down would flash a false "ADB off" on every resume.
+        val adbState = AppCapabilityCoordinator.localAdbState(this)
+        val adbDown = adbState == ServiceBindingState.DEGRADED || adbState == ServiceBindingState.DISABLED
+        val abort = TaskRecordingCoordinator.lastAbortReason
+        taskRecordingItem?.setTrailingText(
+            when {
+                !enabled -> "Disabled"
+                adbDown -> "Enabled · ADB off"
+                !abort.isNullOrBlank() -> "Enabled · issue"
+                else -> "Enabled"
+            }
+        )
+        taskRecordingItem?.setTrailingTextColor(
+            if (enabled && (adbDown || !abort.isNullOrBlank())) getColor(R.color.colorErrorPrimary)
+            else getColor(R.color.colorTextSecondary)
+        )
+    }
+
+    private fun refreshTaskRecording() {
+        updateTaskRecordingLabel()
+        lifecycleScope.launch {
+            val summary = withContext(Dispatchers.IO) {
+                val entries = TaskRecordingStore.listRecordings()
+                val bytes = entries.sumOf { TaskRecordingStore.dirSize(it.dir) }
+                "${entries.size} file(s) · ${TaskRecordingStore.formatBytes(bytes)}"
+            }
+            recordingFilesItem?.setTrailingText(summary)
+        }
+    }
+
+    /** Guards the ~1 minute self-test against double taps and against overlapping runs. */
+    private var selfTestRunning = false
+    private var verifyingRecording = false
+
+    private fun toggleTaskRecording() {
+        val enabled = !KVUtils.isTaskRecordingEnabled()
+        if (!enabled) {
+            KVUtils.setTaskRecordingEnabled(false)
+            refreshTaskRecording()
+            Toast.makeText(this, "Task Recording disabled", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!LocalAdbAutomation.hasConnectionConfig()) {
+            AlertDialog.show(
+                context = this,
+                title = "Local ADB required",
+                message = "Task recording runs over the same Local ADB channel as automation.\n\nConnect Local ADB first (Permissions → Local ADB), then enable recording.",
+                actionTitle = "Got it"
+            )
+            return
+        }
+        if (verifyingRecording || selfTestRunning) {
+            Toast.makeText(this, "Already checking this device", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (appViewModel.isTaskRunning()) {
+            Toast.makeText(this, "Stop the running task first", Toast.LENGTH_LONG).show()
+            return
+        }
+        verifyThenEnableRecording()
+    }
+
+    /**
+     * Probes FIRST and flips the switch only on a pass. The previous order enabled the switch,
+     * deferred the probe by 60s and discarded its result (preWarmAsync returns Unit), so a device
+     * that could not record displayed "Enabled" forever and silently produced nothing — the user
+     * only found out by looking for a video that was never there.
+     */
+    private fun verifyThenEnableRecording() {
+        verifyingRecording = true
+        val loading = LoadingDialog.show(this, "Preparing recording check…")
+        val startedAt = System.currentTimeMillis()
+        var latestStage = "Preparing recording check…"
+
+        fun renderLoading() {
+            if (isFinishing || isDestroyed) return
+            val elapsed = (System.currentTimeMillis() - startedAt) / 1000
+            loading.setMessage("$latestStage\nElapsed ${elapsed}s, please wait…")
+        }
+
+        // Ticking elapsed-seconds on the main-thread Handler: the strongest "still alive" signal, and
+        // unlike the indeterminate ProgressBar it keeps moving even when the device's Animator duration
+        // scale is 0 — which is exactly what made the spinner look frozen on test devices.
+        val ticker = object : Runnable {
+            override fun run() {
+                renderLoading()
+                handler.postDelayed(this, 1_000L)
+            }
+        }
+        renderLoading()
+        handler.post(ticker)
+
+        lifecycleScope.launch {
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    TaskRecordingCoordinator.verifyDevice { _, _, msg ->
+                        runOnUiThread {
+                            latestStage = msg
+                            renderLoading()
+                        }
+                    }
+                }
+            }
+            handler.removeCallbacks(ticker)
+            verifyingRecording = false
+            runCatching { loading.dismiss() }
+            if (isFinishing || isDestroyed) return@launch
+            outcome.onFailure { e ->
+                XLog.e("SettingsActivity", "Recording verification crashed", e)
+                showRecordingUnavailable("verify-crashed", "${e.javaClass.simpleName}: ${e.message}")
+                return@launch
+            }
+            val verdict = outcome.getOrThrow()
+            refreshTaskRecording()
+
+            if (!verdict.usable) {
+                // Show why recording is unavailable so the user knows what to fix, not just that the
+                // switch refused to turn on.
+                showRecordingUnavailable(verdict.reasonCode, verdict.humanReason)
+                return@launch
+            }
+
+            KVUtils.setTaskRecordingEnabled(true)
+            refreshTaskRecording()
+            // Users only care about two things here: does it work, and what to watch out for.
+            // The verification time / wrapper / overlap flags are diagnostics, not instructions —
+            // they stay in copyRecordingDiagnostics() for support reports instead of this dialog.
+            val seamNote = if (verdict.overlap) "" else
+                "\n\nOne thing to note: on very long recordings this device may pause for about a " +
+                        "second every couple of minutes while the video rolls over. Short tasks are unaffected."
+            AlertDialog.show(
+                context = this@SettingsActivity,
+                title = "Task Recording is ready",
+                message = "Recording works on this device — you're all set.\n\n" +
+                        "What gets recorded: only tasks that actually operate the device " +
+                        "(running an agent, replaying or using a Skill, opening an app). " +
+                        "Recording starts the moment a task begins and stops when it ends, " +
+                        "so idle chatting is never captured." +
+                        seamNote,
+                actionTitle = "Got it",
+                isDismissible = true
+            )
+        }
+    }
+
+    private fun showRecordingUnavailable(code: String, human: String) {
+        AlertDialog.show(
+            context = this@SettingsActivity,
+            title = "Recording unavailable on this device",
+            message = "$human\n\n($code)\n\nThe switch stayed off — no task will be recorded until this passes.",
+            actionTitle = "Copy diagnostics",
+            cancelTitle = getString(R.string.common_cancel),
+            messageAlignStart = true,
+            onAction = { copyRecordingDiagnostics() }
+        )
+    }
+
+    private fun copyRecordingDiagnostics() {
+        val text = buildString {
+            append("BQAAgent recording diagnostics\n")
+            append("Device : ").append(TaskRecordingStore.deviceModel()).append('\n')
+            append("System : ").append(TaskRecordingStore.androidVersion()).append('\n')
+            append("App    : ").append(TaskRecordingStore.appVersion()).append("\n\n")
+            append(TaskRecordingCoordinator.diagnostics())
+        }
+        runCatching {
+            getSystemService(android.content.ClipboardManager::class.java)
+                ?.setPrimaryClip(android.content.ClipData.newPlainText("bqaagent_recording", text))
+            Toast.makeText(this, "Diagnostics copied", Toast.LENGTH_SHORT).show()
+        }.onFailure {
+            Toast.makeText(this, "Could not copy diagnostics", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun runRecordingSelfTest() {
+        if (selfTestRunning) {
+            Toast.makeText(this, "Self-test already running", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (appViewModel.isTaskRunning()) {
+            Toast.makeText(this, "Stop the running task first", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!LocalAdbAutomation.hasConnectionConfig()) {
+            Toast.makeText(this, "Connect Local ADB first", Toast.LENGTH_LONG).show()
+            return
+        }
+        selfTestRunning = true
+        Toast.makeText(
+            this,
+            "Running recording self-test… takes up to a minute, keep this page open",
+            Toast.LENGTH_LONG
+        ).show()
+        lifecycleScope.launch {
+            // runCatching, not a bare call: lifecycleScope has no CoroutineExceptionHandler,
+            // so anything that escapes here terminates the process instead of showing an error.
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    RecordingSelfTest.run(
+                        isTaskRunning = { appViewModel.isTaskRunning() },
+                        deep = true
+                    )
+                }
+            }
+            selfTestRunning = false
+            if (isFinishing || isDestroyed) return@launch
+            refreshTaskRecording()
+            outcome.onFailure { e ->
+                XLog.e("SettingsActivity", "Recording self-test crashed the coroutine", e)
+                AlertDialog.show(
+                    context = this@SettingsActivity,
+                    title = "Self-test crashed",
+                    message = "${e.javaClass.simpleName}: ${e.message}\n\nSee logcat tag RecordingSelfTest for the stack.",
+                    actionTitle = "Got it",
+                    messageAlignStart = true
+                )
+                return@launch
+            }
+            val result = outcome.getOrThrow()
+            AlertDialog.show(
+                context = this@SettingsActivity,
+                title = if (result.passed) "Self-test passed" else "Self-test found problems",
+                message = result.summary,
+                actionTitle = "Share full report",
+                cancelTitle = getString(R.string.common_cancel),
+                messageAlignStart = true,
+                messageTextSizeDp = 12f,
+                messageMaxLines = 18,
+                onAction = {
+                    val file = result.reportFile
+                    if (file != null && file.exists()) {
+                        sharePlainFile(file, "Share recording self-test report", "text/plain")
+                    } else {
+                        Toast.makeText(this@SettingsActivity, "Report file unavailable", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            )
+        }
+    }
+
+    private fun sharePlainFile(file: java.io.File, chooserTitle: String, mimeType: String) {
+        val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mimeType
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(Intent.createChooser(intent, chooserTitle))
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, "No app available to share this file", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun refreshLanguageItem() {
         languageItem?.setTrailingText(currentLanguageLabel())
     }
@@ -204,7 +485,8 @@ class SettingsActivity : BaseActivity() {
     private fun applyThemeToGroups(tc: io.agents.bqaagent.ui.chat.ThemeManager.ChatColors) {
         val groups = listOf(
             R.id.permissionsGroup, R.id.channelGroup, R.id.modelGroup,
-            R.id.appearanceGroup, R.id.toolsGroup, R.id.remoteGroup, R.id.aboutGroup
+            R.id.appearanceGroup, R.id.skillManagerGroup, R.id.recordingGroup,
+            R.id.toolsGroup, R.id.remoteGroup, R.id.aboutGroup
         )
         for (id in groups) {
             val g = findViewById<MenuGroup>(id) ?: continue
@@ -326,6 +608,26 @@ class SettingsActivity : BaseActivity() {
             KVUtils.setSensitiveModeEnabled(true)
             refreshSensitiveMode()
             Toast.makeText(this, R.string.sensitive_mode_enabled, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun toggleSkillCaptureMode() {
+        val enabled = !KVUtils.isSkillCaptureModeEnabled()
+        KVUtils.setSkillCaptureModeEnabled(enabled)
+        refreshSkillCaptureMode()
+        if (enabled) {
+            AlertDialog.show(
+                context = this,
+                title = "Skill Capture Mode enabled",
+                message = "Tasks now run independently without chat history, and completed tasks can be recorded and saved as reusable skills.\n\nNote: please describe the complete task in one message, since follow-up replies will not continue the previous task.",
+                actionTitle = "Got it"
+            )
+        } else {
+            Toast.makeText(
+                this,
+                "Skill Capture Mode off: tasks follow chat history again, skill saving disabled",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -649,6 +951,61 @@ class SettingsActivity : BaseActivity() {
             showDivider = false
         ).apply {
             setTrailingText(if (KVUtils.isSensitiveModeEnabled()) "Enabled" else "Disabled")
+        }
+
+        // Skill Management
+        val skillManagerGroup = findViewById<MenuGroup>(R.id.skillManagerGroup)
+        skillManagerGroup.setTitle("Skill Management")
+
+        skillCaptureModeItem = skillManagerGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_save,
+            title = "Skill Capture Mode",
+            onClick = { toggleSkillCaptureMode() },
+            showDivider = true
+        ).apply {
+            setTrailingText(if (KVUtils.isSkillCaptureModeEnabled()) "Enabled" else "Disabled")
+        }
+
+        skillManagerGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_agenda,
+            title = "Skill Data",
+            onClick = {
+                startActivity(Intent(this, SkillManagerActivity::class.java))
+            },
+            showDivider = false
+        )
+
+        // Task Recording
+        val recordingGroup = findViewById<MenuGroup>(R.id.recordingGroup)
+        recordingGroup.setTitle("Task Recording")
+
+        taskRecordingItem = recordingGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_camera,
+            title = "Task Recording",
+            onClick = { toggleTaskRecording() },
+            showDivider = true
+        ).apply {
+            setTrailingText(if (KVUtils.isTaskRecordingEnabled()) "Enabled" else "Disabled")
+        }
+
+        recordingFilesItem = recordingGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_gallery,
+            title = "Recorded Files",
+            onClick = {
+                startActivity(
+                    Intent(this, io.agents.bqaagent.ui.recording.RecordingManagerActivity::class.java)
+                )
+            },
+            showDivider = false
+        ).apply {
+            setTrailingText("0 file(s)")
+            // Support tool, not a user flow. Everything a user needs is now covered by the
+            // verification gate in toggleTaskRecording(), so the self-test moves behind a
+            // long-press: it stays reachable for diagnostics without asking anyone to run it.
+            setOnLongClickListener {
+                runRecordingSelfTest()
+                true
+            }
         }
 
         // Tools

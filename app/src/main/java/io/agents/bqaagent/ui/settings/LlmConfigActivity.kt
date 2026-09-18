@@ -556,9 +556,9 @@ class LlmConfigActivity : BaseActivity() {
             val provider = selectedProvider
             val apiKey = etApiKey.text.toString().trim()
             val baseUrl = if (provider == CloudProvider.CUSTOM) etBaseUrl.text.toString().trim()
-            else provider.defaultBaseUrl
+                else provider.defaultBaseUrl
             val modelId = if (provider == CloudProvider.CUSTOM) etModelName.text.toString().trim()
-            else selectedModelId
+                else selectedModelId
 
             tvStatus.visibility = View.VISIBLE
             tvStatus.text = "Testing real request..."

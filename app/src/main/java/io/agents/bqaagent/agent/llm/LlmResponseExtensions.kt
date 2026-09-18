@@ -11,6 +11,7 @@ internal fun ChatResponse.toLlmResponse(): LlmResponse {
         text = aiMessage.text(),
         toolExecutionRequests = aiMessage.toolExecutionRequests() ?: emptyList(),
         tokenUsage = tokenUsage(),
-        modelName = modelName()
+        modelName = modelName(),
+        reasoningText = aiMessage.thinking()?.takeIf { it.isNotBlank() }
     )
 }

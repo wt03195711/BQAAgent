@@ -73,6 +73,10 @@
     <color name="colorWarningContainer">#FFFFF9F6</color>
     <color name="colorWarningOnContainer">#FFBE5A00</color>
 
+    <!-- Cancelled (neutral) -->
+    <color name="colorCancelledPrimary">#FF767676</color>
+    <color name="colorCancelledOnPrimary">#FFFFFFFF</color>
+
     <!-- Success -->
     <color name="colorSuccessPrimary">#FF2BA471</color>
     <color name="colorSuccessOnPrimary">#FFFFFFFF</color>

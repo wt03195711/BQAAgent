@@ -157,6 +157,8 @@
     <string name="cd_selected">已选中</string>
     <string name="cd_task_success">任务完成</string>
     <string name="cd_task_error">任务失败</string>
+    <string name="cd_task_stopped">任务停止</string>
+    <string name="cd_task_cancelled">任务取消</string>
     <string name="cd_channel_logo">渠道图标</string>
     <string name="cd_empty_state">暂无数据</string>
     <string name="cd_error_state">加载失败</string>

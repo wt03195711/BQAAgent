@@ -6,6 +6,8 @@ package io.agents.bqaagent.widget
 import android.app.Dialog
 import android.content.Context
 import android.os.Bundle
+import android.text.method.ScrollingMovementMethod
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -38,6 +40,11 @@ class AlertDialog private constructor(context: Context) : Dialog(context, R.styl
     private var cancelTitle: String? = null
     private var isDismissible: Boolean = true
 
+    // Opt-in message styling. All three default to "keep the existing centred, unbounded look".
+    private var messageAlignStart: Boolean = false
+    private var messageTextSizeDp: Float = 0f
+    private var messageMaxLines: Int = 0
+
     @ColorInt private var actionBgColor: Int? = null
     @ColorInt private var actionTextColor: Int? = null
     @ColorInt private var actionBorderColor: Int? = null
@@ -65,7 +72,13 @@ class AlertDialog private constructor(context: Context) : Dialog(context, R.styl
             @ColorInt cancelBorderColor: Int? = null,
             isDismissible: Boolean = true,
             onAction: (() -> Unit)? = null,
-            onCancel: (() -> Unit)? = null
+            onCancel: (() -> Unit)? = null,
+            /** Left-aligns the message instead of centring it. Use for multi-line reports. */
+            messageAlignStart: Boolean = false,
+            /** Overrides the 14dp XML text size; 0 keeps it. */
+            messageTextSizeDp: Float = 0f,
+            /** Caps the message height and makes it scroll internally; 0 = unlimited (current behaviour). */
+            messageMaxLines: Int = 0
         ): AlertDialog {
             return AlertDialog(context).apply {
                 this.title = title
@@ -81,6 +94,9 @@ class AlertDialog private constructor(context: Context) : Dialog(context, R.styl
                 this.isDismissible = isDismissible
                 this.onAction = onAction
                 this.onCancel = onCancel
+                this.messageAlignStart = messageAlignStart
+                this.messageTextSizeDp = messageTextSizeDp
+                this.messageMaxLines = messageMaxLines
                 show()
             }
         }
@@ -169,8 +185,20 @@ class AlertDialog private constructor(context: Context) : Dialog(context, R.styl
         // Message
         findViewById<TextView>(R.id.tvMessage).apply {
             if (message.isNotEmpty()) {
+                if (messageAlignStart) gravity = Gravity.START
+                if (messageTextSizeDp > 0f) setTextSize(TypedValue.COMPLEX_UNIT_DIP, messageTextSizeDp)
                 text = message
                 visibility = View.VISIBLE
+                if (messageMaxLines > 0) {
+                    maxLines = messageMaxLines
+                    movementMethod = ScrollingMovementMethod.getInstance()
+                    // Safe only because dialog_alert.xml declares android:scrollbars="vertical".
+                    // Without it, setScrollbarFadingEnabled(false) lazily creates a scroll cache
+                    // whose ScrollBarDrawable is null and the next draw frame NPEs in
+                    // View.onDrawScrollBars — on the main thread, outside any try/catch.
+                    isVerticalScrollBarEnabled = true
+                    isScrollbarFadingEnabled = false
+                }
             }
         }
 

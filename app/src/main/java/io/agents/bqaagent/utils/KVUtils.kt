@@ -161,7 +161,56 @@ object KVUtils {
     fun isSensitiveModeEnabled(): Boolean = getBoolean(KEY_SENSITIVE_MODE_ENABLED, true)
     fun setSensitiveModeEnabled(enabled: Boolean) = putBoolean(KEY_SENSITIVE_MODE_ENABLED, enabled)
 
-    // ==================== Local ADB Automation ====================
+    // ==================== Skill Capture Mode ====================
+    private const val KEY_SKILL_CAPTURE_MODE_ENABLED = "KEY_SKILL_CAPTURE_MODE_ENABLED"
+    fun isSkillCaptureModeEnabled(): Boolean = getBoolean(KEY_SKILL_CAPTURE_MODE_ENABLED, false)
+    fun setSkillCaptureModeEnabled(enabled: Boolean) = putBoolean(KEY_SKILL_CAPTURE_MODE_ENABLED, enabled)
+
+    // ==================== LLM Skill Matching ====================
+    // When off (default), skill matching is L0-only: a task replays a saved skill
+    // ONLY when its text is verbatim identical to the recorded originalTaskText.
+    // When on, the LLM semantic matcher (SkillAnalyzer) is additionally consulted.
+    private const val KEY_LLM_SKILL_MATCHING_ENABLED = "KEY_LLM_SKILL_MATCHING_ENABLED"
+    fun isLlmSkillMatchingEnabled(): Boolean = getBoolean(KEY_LLM_SKILL_MATCHING_ENABLED, false)
+    fun setLlmSkillMatchingEnabled(enabled: Boolean) = putBoolean(KEY_LLM_SKILL_MATCHING_ENABLED, enabled)
+
+    // ==================== Task Recording ====================
+    // Master switch, default OFF. While off, TaskRecordingCoordinator never touches the device.
+    private const val KEY_TASK_RECORDING_ENABLED = "KEY_TASK_RECORDING_ENABLED"
+    // Background wrapper resolved by the in-app self-test: "setsid" / "nohup" / "none"; "" = not probed yet.
+    private const val KEY_TASK_RECORDING_WRAPPER = "KEY_TASK_RECORDING_WRAPPER"
+    // Whether two screenrecord instances can capture at the same time (near-seamless rotation).
+    private const val KEY_TASK_RECORDING_OVERLAP = "KEY_TASK_RECORDING_OVERLAP"
+    // 0 = downscale to a 720 short side, 1 = record without --size, 2 = unsupported.
+    private const val KEY_TASK_RECORDING_SIZE_LEVEL = "KEY_TASK_RECORDING_SIZE_LEVEL"
+    private const val KEY_TASK_RECORDING_BIT_RATE = "KEY_TASK_RECORDING_BIT_RATE"
+    private const val KEY_TASK_RECORDING_MAX_TOTAL_MINUTES = "KEY_TASK_RECORDING_MAX_TOTAL_MINUTES"
+    // Device the configuration above was verified on. Without this scope a wrapper cached on one
+    // phone survives a backup restore onto another, and TaskRecordingCoordinator.doStart() only
+    // re-probes when the cache is blank — so the foreign value would be used forever unvalidated.
+    private const val KEY_TASK_RECORDING_VERIFIED_DEVICE = "KEY_TASK_RECORDING_VERIFIED_DEVICE"
+    private const val KEY_TASK_RECORDING_VERIFIED_AT = "KEY_TASK_RECORDING_VERIFIED_AT"
+
+    fun isTaskRecordingEnabled(): Boolean = getBoolean(KEY_TASK_RECORDING_ENABLED, false)
+    fun setTaskRecordingEnabled(enabled: Boolean) = putBoolean(KEY_TASK_RECORDING_ENABLED, enabled)
+    fun getTaskRecordingWrapper(): String = getString(KEY_TASK_RECORDING_WRAPPER, "")
+    fun setTaskRecordingWrapper(value: String) = putString(KEY_TASK_RECORDING_WRAPPER, value)
+    fun isTaskRecordingOverlapEnabled(): Boolean = getBoolean(KEY_TASK_RECORDING_OVERLAP, false)
+    fun setTaskRecordingOverlapEnabled(value: Boolean) = putBoolean(KEY_TASK_RECORDING_OVERLAP, value)
+    fun getTaskRecordingSizeLevel(): Int = getInt(KEY_TASK_RECORDING_SIZE_LEVEL, 0)
+    fun setTaskRecordingSizeLevel(value: Int) = putInt(KEY_TASK_RECORDING_SIZE_LEVEL, value)
+    fun getTaskRecordingBitRate(): Int = getInt(KEY_TASK_RECORDING_BIT_RATE, 2_000_000)
+    fun setTaskRecordingBitRate(value: Int) = putInt(KEY_TASK_RECORDING_BIT_RATE, value)
+    fun getTaskRecordingMaxTotalMinutes(): Int = getInt(KEY_TASK_RECORDING_MAX_TOTAL_MINUTES, 30)
+    fun setTaskRecordingMaxTotalMinutes(value: Int) = putInt(KEY_TASK_RECORDING_MAX_TOTAL_MINUTES, value)
+    fun getTaskRecordingVerifiedDevice(): String = getString(KEY_TASK_RECORDING_VERIFIED_DEVICE, "")
+    fun setTaskRecordingVerifiedDevice(value: String) = putString(KEY_TASK_RECORDING_VERIFIED_DEVICE, value)
+    fun getTaskRecordingVerifiedAt(): Long = getLong(KEY_TASK_RECORDING_VERIFIED_AT, 0L)
+    fun setTaskRecordingVerifiedAt(value: Long) = putLong(KEY_TASK_RECORDING_VERIFIED_AT, value)
+    fun clearTaskRecordingVerification() =
+        remove(KEY_TASK_RECORDING_VERIFIED_DEVICE, KEY_TASK_RECORDING_VERIFIED_AT)
+
+    // ==================== Local ADB Automation ===================
     private const val KEY_LOCAL_ADB_HOST = "KEY_LOCAL_ADB_HOST"
     private const val KEY_LOCAL_ADB_PORT = "KEY_LOCAL_ADB_PORT"
     private const val KEY_LOCAL_ADB_CERT = "KEY_LOCAL_ADB_CERT"

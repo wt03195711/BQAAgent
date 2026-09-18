@@ -30,6 +30,11 @@ public class SendFileTool extends BaseTool {
     }
 
     @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("file_path");
+    }
+
+    @Override
     public String getDisplayName() {
         return ClawApplication.Companion.getInstance().getString(R.string.tool_name_send_file);
     }

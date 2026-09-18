@@ -157,6 +157,8 @@
     <string name="cd_selected">Selected</string>
     <string name="cd_task_success">Task completed</string>
     <string name="cd_task_error">Task failed</string>
+    <string name="cd_task_stopped">Task stopped</string>
+    <string name="cd_task_cancelled">Task cancelled</string>
     <string name="cd_channel_logo">Channel logo</string>
     <string name="cd_empty_state">No data</string>
     <string name="cd_error_state">Load failed</string>

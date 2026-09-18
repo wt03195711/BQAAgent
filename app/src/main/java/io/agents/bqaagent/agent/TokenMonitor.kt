@@ -16,6 +16,8 @@ class TokenMonitor(private val modelName: String) {
     private var totalTokens: Int = 0
     private var currentStep: Int = 0
 
+    private var currentIntent: String = ""
+
     enum class State {
         NORMAL,     // 0-30K tokens
         CAUTION,    // 30K-100K
@@ -31,15 +33,17 @@ class TokenMonitor(private val modelName: String) {
         val estimatedCostUsd: Double,
         val state: State,
         val formattedTokens: String,
-        val formattedCost: String
+        val formattedCost: String,
+        val intent: String = ""
     )
 
     /**
      * Record token usage from one LLM call.
      * Call this after each agent loop iteration.
      */
-    fun record(step: Int, inputTokens: Int?, outputTokens: Int?, totalTokenCount: Int?) {
+    fun record(step: Int, inputTokens: Int?, outputTokens: Int?, totalTokenCount: Int?, intent: String = "") {
         currentStep = step
+        currentIntent = intent
         if (inputTokens != null) totalInputTokens += inputTokens
         if (outputTokens != null) totalOutputTokens += outputTokens
         if (totalTokenCount != null) {
@@ -71,7 +75,8 @@ class TokenMonitor(private val modelName: String) {
             estimatedCostUsd = cost,
             state = state,
             formattedTokens = ModelPricing.formatTokens(totalTokens),
-            formattedCost = ModelPricing.formatCost(cost)
+            formattedCost = ModelPricing.formatCost(cost),
+            intent = currentIntent
         )
     }
 
@@ -80,6 +85,7 @@ class TokenMonitor(private val modelName: String) {
         totalOutputTokens = 0
         totalTokens = 0
         currentStep = 0
+        currentIntent = ""
     }
 
     companion object {

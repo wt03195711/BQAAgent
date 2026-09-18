@@ -15,6 +15,7 @@ import io.agents.bqaagent.utils.UiTextMatchUtils;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -37,6 +38,11 @@ public class InputAmountTool extends BaseTool {
     @Override
     public String getName() {
         return "input_amount";
+    }
+
+    @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("amount");
     }
 
     @Override

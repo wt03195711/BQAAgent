@@ -16,6 +16,7 @@ import io.agents.bqaagent.tool.ToolParameter;
 import io.agents.bqaagent.tool.ToolResult;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -28,6 +29,11 @@ public class ScrollToFindTool extends BaseTool {
     @Override
     public String getName() {
         return "scroll_to_find";
+    }
+
+    @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("text");
     }
 
     @Override

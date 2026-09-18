@@ -13,6 +13,7 @@ import com.google.gson.reflect.TypeToken;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.model.chat.request.json.JsonBooleanSchema;
+import dev.langchain4j.model.chat.request.json.JsonEnumSchema;
 import dev.langchain4j.model.chat.request.json.JsonIntegerSchema;
 import dev.langchain4j.model.chat.request.json.JsonNumberSchema;
 import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
@@ -63,28 +64,36 @@ public class LangChain4jToolBridge {
 
         for (ToolParameter param : params) {
             JsonSchemaElement schema;
-            switch (param.getType()) {
-                case "integer":
-                    schema = JsonIntegerSchema.builder()
-                            .description(param.getDescription())
-                            .build();
-                    break;
-                case "number":
-                    schema = JsonNumberSchema.builder()
-                            .description(param.getDescription())
-                            .build();
-                    break;
-                case "boolean":
-                    schema = JsonBooleanSchema.builder()
-                            .description(param.getDescription())
-                            .build();
-                    break;
-                case "string":
-                default:
-                    schema = JsonStringSchema.builder()
-                            .description(param.getDescription())
-                            .build();
-                    break;
+            List<String> enumValues = param.getEnumValues();
+            if (enumValues != null && !enumValues.isEmpty()) {
+                schema = JsonEnumSchema.builder()
+                        .enumValues(enumValues)
+                        .description(param.getDescription())
+                        .build();
+            } else {
+                switch (param.getType()) {
+                    case "integer":
+                        schema = JsonIntegerSchema.builder()
+                                .description(param.getDescription())
+                                .build();
+                        break;
+                    case "number":
+                        schema = JsonNumberSchema.builder()
+                                .description(param.getDescription())
+                                .build();
+                        break;
+                    case "boolean":
+                        schema = JsonBooleanSchema.builder()
+                                .description(param.getDescription())
+                                .build();
+                        break;
+                    case "string":
+                    default:
+                        schema = JsonStringSchema.builder()
+                                .description(param.getDescription())
+                                .build();
+                        break;
+                }
             }
             properties.put(param.getName(), schema);
             if (param.isRequired()) {

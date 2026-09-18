@@ -4,6 +4,7 @@
 package io.agents.bqaagent.ui.chat
 
 import android.content.Context
+import io.agents.bqaagent.TaskStatus
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -35,7 +36,15 @@ object ChatHistoryManager {
 
     private const val MESSAGE_TIMESTAMP_PREFIX = "<!-- bqaagent:timestamp="
     private const val MESSAGE_TIMESTAMP_SUFFIX = " -->"
+    /** Same hidden-comment trick as the timestamp: survives markdown, invisible when rendered. */
+    private const val MESSAGE_RECORDING_PREFIX = "<!-- bqaagent:recording="
+    private const val MESSAGE_RECORDING_SUFFIX = " -->"
+    private const val MESSAGE_STATUS_PREFIX = "<!-- bqaagent:status="
+    private const val MESSAGE_STATUS_SUFFIX = " -->"
     private val frontmatterDateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
+
+    /** Maximum number of conversations retained on disk; the least-recently-accessed are pruned beyond this. */
+    const val MAX_CONVERSATIONS = 100
 
     data class ConversationSummary(
         val id: String,
@@ -56,19 +65,26 @@ object ChatHistoryManager {
     fun save(context: Context, conversationId: String, messages: List<ChatMessage>, model: String) {
         if (messages.isEmpty()) return
 
-        // Generate title from first user message
-        val firstUserMsg = messages.firstOrNull { it.role == ChatMessage.Role.USER }
-        val title = firstUserMsg?.content?.take(50)?.replace(Regex("[^a-zA-Z0-9\\s]"), "")?.trim()?.replace("\\s+".toRegex(), "-")?.lowercase() ?: "untitled"
-        val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(messages.first().timestamp))
-        val fileName = "$dateStr-$title.md"
+        val dir = getChatDir(context)
+        // Match the target file by conversation id (frontmatter) so a save ALWAYS rewrites the same
+        // file. New conversations are named by the unique conversationId — never by message content —
+        // so two chats can never collide onto one filename and silently overwrite each other.
+        val file = findFileByConversationId(dir, conversationId) ?: File(dir, "$conversationId.md")
 
-        val file = File(getChatDir(context), fileName)
+        val firstUserMsg = messages.firstOrNull { it.role == ChatMessage.Role.USER }
+        // A user-renamed title is authoritative and must survive every later save; only derive a
+        // title from the first message when the user has not customized it.
+        val customTitle = readCustomTitle(file)
+        val isCustomTitle = customTitle != null
+        val title = (customTitle ?: firstUserMsg?.content?.take(80))
+            ?.replace(Regex("\\s+"), " ")?.trim()?.takeIf { it.isNotEmpty() } ?: "Untitled"
 
         val sb = StringBuilder()
         // Frontmatter
         sb.appendLine("---")
         sb.appendLine("id: $conversationId")
-        sb.appendLine("title: ${firstUserMsg?.content?.take(80) ?: "Untitled"}")
+        sb.appendLine("title: $title")
+        if (isCustomTitle) sb.appendLine("title_custom: true")
         sb.appendLine("created: ${SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(Date(messages.first().timestamp))}")
         sb.appendLine("model: $model")
         sb.appendLine("---")
@@ -90,6 +106,12 @@ object ChatHistoryManager {
                         sb.appendLine("## 🦞 Assistant")
                     }
                     sb.appendLine(serializeTimestamp(msg.timestamp))
+                    msg.recordingId?.takeIf { it.isNotBlank() }?.let {
+                        sb.appendLine(serializeRecordingId(it))
+                    }
+                    msg.taskStatus?.let {
+                        sb.appendLine(serializeTaskStatus(it.name))
+                    }
                     sb.appendLine(msg.content)
                     sb.appendLine()
                 }
@@ -100,7 +122,8 @@ object ChatHistoryManager {
                     sb.appendLine()
                 }
                 ChatMessage.Role.TOOL_GROUP -> {
-                    sb.appendLine("## Tools")
+                    val titleSuffix = msg.groupTitle?.takeIf { it.isNotBlank() }?.let { " [$it]" }.orEmpty()
+                    sb.appendLine("## Tools$titleSuffix")
                     sb.appendLine(serializeTimestamp(msg.timestamp))
                     val steps = msg.toolSteps.orEmpty()
                     if (steps.isNotEmpty()) {
@@ -111,10 +134,13 @@ object ChatHistoryManager {
                             val tokens = step.tokenCount?.toString().orEmpty()
                             val tokenText = step.tokenText.orEmpty()
                             val costText = step.costText.orEmpty()
+                            val safeSummary = step.summary.replace("\n", " ").replace("|", "·")
+                            val safeIntent = step.intent.orEmpty().replace("\n", " ").replace("|", "·")
+                            val safeParams = step.params.orEmpty().replace("\n", " ").replace("|", "·")
                             sb.appendLine(
                                 "- $icon ${step.toolName} | started=${step.startedAt} | completed=$completed | " +
-                                    "durationMs=$duration | tokens=$tokens | tokenText=$tokenText | cost=$costText | " +
-                                    "llm=${step.isLlmCall} | ${step.summary}"
+                                        "durationMs=$duration | tokens=$tokens | tokenText=$tokenText | cost=$costText | " +
+                                        "llm=${step.isLlmCall} | params=$safeParams | intent=$safeIntent | $safeSummary"
                             )
                         }
                     } else if (msg.content.isNotBlank()) {
@@ -133,7 +159,7 @@ object ChatHistoryManager {
             try {
                 chatDatabase.indexConversation(
                     id = conversationId,
-                    title = firstUserMsg?.content?.take(80) ?: "Untitled",
+                    title = title,
                     created = messages.first().timestamp,
                     model = model,
                     filePath = file.absolutePath,
@@ -159,6 +185,9 @@ object ChatHistoryManager {
         var currentRole: ChatMessage.Role? = null
         var currentModelName: String? = null
         var currentTimestamp: Long? = null
+        var currentGroupTitle: String? = null
+        var currentRecordingId: String? = null
+        var currentTaskStatus: TaskStatus? = null
         val contentBuilder = StringBuilder()
 
         for (line in lines) {
@@ -177,33 +206,54 @@ object ChatHistoryManager {
 
             when {
                 line.startsWith("## User") -> {
-                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp)
+                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus)
                     currentRole = ChatMessage.Role.USER
                     currentModelName = null
                     currentTimestamp = null
+                    currentGroupTitle = null
+                    currentRecordingId = null
+                    currentTaskStatus = null
                 }
                 line.startsWith("## 🦞 Assistant") -> {
-                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp)
+                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus)
                     currentRole = ChatMessage.Role.ASSISTANT
                     // Extract model name from "## 🦞 Assistant [ModelName]"
                     val bracketMatch = Regex("\\[(.+)]").find(line)
                     currentModelName = bracketMatch?.groupValues?.get(1)
                     currentTimestamp = null
+                    currentGroupTitle = null
+                    currentRecordingId = null
+                    currentTaskStatus = null
                 }
                 line.startsWith("## System") -> {
-                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp)
+                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus)
                     currentRole = ChatMessage.Role.SYSTEM
                     currentModelName = null
                     currentTimestamp = null
+                    currentGroupTitle = null
+                    currentRecordingId = null
+                    currentTaskStatus = null
                 }
                 line.startsWith("## Tools") -> {
-                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp)
+                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus)
                     currentRole = ChatMessage.Role.TOOL_GROUP
                     currentModelName = null
                     currentTimestamp = null
+                    // Extract group title from "## Tools [Replay Steps]"
+                    currentGroupTitle = Regex("\\[(.+)]").find(line)?.groupValues?.get(1)
+                    currentRecordingId = null
+                    currentTaskStatus = null
                 }
                 currentRole != null && line.startsWith(MESSAGE_TIMESTAMP_PREFIX) -> {
                     currentTimestamp = parseMessageTimestamp(line)
+                }
+                // Must stay above the `else` branch: otherwise the marker is appended to
+                // contentBuilder and the user sees raw HTML comment text inside the bubble.
+                currentRole != null && line.startsWith(MESSAGE_RECORDING_PREFIX) -> {
+                    currentRecordingId = parseRecordingId(line)
+                }
+                currentRole != null && line.startsWith(MESSAGE_STATUS_PREFIX) -> {
+                    currentTaskStatus = parseTaskStatus(line)
                 }
                 else -> {
                     if (currentRole != null && line.isNotBlank()) {
@@ -213,7 +263,7 @@ object ChatHistoryManager {
                 }
             }
         }
-        flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp)
+        flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus)
 
         return messages
     }
@@ -224,7 +274,10 @@ object ChatHistoryManager {
         content: StringBuilder,
         modelName: String? = null,
         timestamp: Long? = null,
-        fallbackConversationTimestamp: Long
+        fallbackConversationTimestamp: Long,
+        groupTitle: String? = null,
+        recordingId: String? = null,
+        taskStatus: TaskStatus? = null
     ) {
         if (role != null && content.isNotEmpty()) {
             val resolvedTimestamp = timestamp ?: (fallbackConversationTimestamp + messages.size * 1000L)
@@ -240,7 +293,10 @@ object ChatHistoryManager {
                     content = text,
                     timestamp = resolvedTimestamp,
                     toolSteps = toolSteps,
-                    modelName = modelName
+                    modelName = modelName,
+                    groupTitle = groupTitle,
+                    recordingId = recordingId,
+                    taskStatus = taskStatus
                 )
             )
             content.clear()
@@ -249,6 +305,28 @@ object ChatHistoryManager {
 
     private fun serializeTimestamp(timestamp: Long): String {
         return "$MESSAGE_TIMESTAMP_PREFIX$timestamp$MESSAGE_TIMESTAMP_SUFFIX"
+    }
+
+    private fun serializeRecordingId(recordingId: String): String {
+        return "$MESSAGE_RECORDING_PREFIX$recordingId$MESSAGE_RECORDING_SUFFIX"
+    }
+
+    private fun parseRecordingId(line: String): String? {
+        return line.removePrefix(MESSAGE_RECORDING_PREFIX)
+            .removeSuffix(MESSAGE_RECORDING_SUFFIX)
+            .trim()
+            .takeIf { it.isNotBlank() }
+    }
+
+    private fun serializeTaskStatus(status: String): String {
+        return "$MESSAGE_STATUS_PREFIX$status$MESSAGE_STATUS_SUFFIX"
+    }
+
+    private fun parseTaskStatus(line: String): TaskStatus? {
+        val raw = line.removePrefix(MESSAGE_STATUS_PREFIX)
+            .removeSuffix(MESSAGE_STATUS_SUFFIX)
+            .trim()
+        return runCatching { TaskStatus.valueOf(raw) }.getOrNull()
     }
 
     private fun parseMessageTimestamp(line: String): Long? {
@@ -306,7 +384,18 @@ object ChatHistoryManager {
                     ?.removePrefix("llm=")
                     ?.toBooleanStrictOrNull()
                     ?: title.equals("LLM Call", ignoreCase = true)
-                val summary = parts.lastOrNull()?.trim().orEmpty()
+                val intent = parts.firstOrNull { it.startsWith("intent=") }
+                    ?.removePrefix("intent=")
+                    ?.takeIf { it.isNotBlank() }
+                val params = parts.firstOrNull { it.startsWith("params=") }
+                    ?.removePrefix("params=")
+                    ?.takeIf { it.isNotBlank() }
+                var summary = parts.lastOrNull()?.trim().orEmpty()
+                var resolvedIntent = intent
+                if (resolvedIntent == null && " · Intent: " in summary) {
+                    resolvedIntent = summary.substringAfter(" · Intent: ").trim().takeIf { it.isNotBlank() }
+                    summary = summary.substringBefore(" · Intent: ").trim()
+                }
                 ToolStep(
                     toolName = title,
                     summary = summary,
@@ -318,6 +407,8 @@ object ChatHistoryManager {
                     tokenText = tokenText,
                     costText = costText,
                     isLlmCall = isLlmCall,
+                    intent = resolvedIntent,
+                    params = params,
                 )
             } else {
                 val name = body.substringBefore("→").trim()
@@ -368,25 +459,110 @@ object ChatHistoryManager {
 
     /**
      * Rename a conversation by updating the title in the markdown frontmatter.
+     * Marks the title as user-customized (title_custom) so later saves never overwrite it.
      */
     fun rename(file: File, newTitle: String): Boolean {
         if (!file.exists()) return false
-        try {
+        return try {
             val content = file.readText()
+            val safeTitle = newTitle.replace(Regex("\\s+"), " ").trim()
+            val hasCustomFlag = Regex("(?m)^title_custom:").containsMatchIn(content)
+            val replacement =
+                if (hasCustomFlag) "title: $safeTitle" else "title: $safeTitle\ntitle_custom: true"
             val updated = content.replaceFirst(
-                Regex("(?m)^title: .+$"),
-                "title: $newTitle"
+                Regex("(?m)^title: .*$"),
+                Regex.escapeReplacement(replacement)
             )
             file.writeText(updated)
-            return true
+            true
         } catch (e: Exception) {
             io.agents.bqaagent.utils.XLog.e("ChatHistoryManager", "Failed to rename conversation", e)
-            return false
+            false
         }
     }
 
     /**
-     * Delete a conversation.
+     * Mark a conversation as just accessed so it sorts to the top of the recent list.
      */
-    fun delete(file: File): Boolean = file.delete()
+    fun touchAccess(file: File) {
+        runCatching { if (file.exists()) file.setLastModified(System.currentTimeMillis()) }
+    }
+
+    /**
+     * Keep at most [MAX_CONVERSATIONS] conversations on disk. When over the limit, prune the
+     * least-recently-accessed ones (bottom of the recent list) first, never the [protectId] one.
+     */
+    fun enforceRetention(context: Context, protectId: String) {
+        val conversations = listConversations(context) // most-recently-accessed first
+        val excess = conversations.size - MAX_CONVERSATIONS
+        if (excess <= 0) return
+        val victims = conversations.asReversed().filter { it.id != protectId }.take(excess)
+        if (victims.isEmpty()) return
+        val db = runCatching { ChatDatabase(context) }.getOrNull()
+        try {
+            victims.forEach { conv ->
+                deleteConversationFiles(conv.file)
+                runCatching { db?.deleteConversation(conv.id) }
+            }
+        } finally {
+            runCatching { db?.close() }
+        }
+    }
+
+    private fun deleteConversationFiles(file: File) {
+        runCatching {
+            val memory = File(file.parentFile, file.nameWithoutExtension + ".memory.md")
+            file.delete()
+            if (memory.exists()) memory.delete()
+        }
+    }
+
+    private fun findFileByConversationId(dir: File, conversationId: String): File? {
+        if (conversationId.isEmpty() || !dir.exists()) return null
+        val files = dir.listFiles { f -> f.extension == "md" && !f.name.endsWith(".memory.md") }
+            ?: return null
+        return files.firstOrNull { readFrontmatterId(it) == conversationId }
+    }
+
+    private fun readFrontmatterId(file: File): String {
+        var id = ""
+        runCatching {
+            file.useLines { lines ->
+                var inFm = false
+                for (line in lines) {
+                    if (line == "---") { if (!inFm) { inFm = true; continue } else break }
+                    if (inFm && line.startsWith("id: ")) { id = line.removePrefix("id: ").trim(); break }
+                }
+            }
+        }
+        return id
+    }
+
+    private fun readCustomTitle(file: File): String? {
+        if (!file.exists()) return null
+        var title: String? = null
+        var custom = false
+        runCatching {
+            file.useLines { lines ->
+                var inFm = false
+                for (line in lines) {
+                    if (line == "---") { if (!inFm) { inFm = true; continue } else break }
+                    if (inFm) {
+                        if (line.startsWith("title: ")) title = line.removePrefix("title: ")
+                        if (line.startsWith("title_custom:")) custom = line.removePrefix("title_custom:").trim().toBoolean()
+                    }
+                }
+            }
+        }
+        return if (custom) title?.takeIf { it.isNotBlank() } else null
+    }
+
+    /**
+     * Delete a conversation and its companion memory digest file.
+     */
+    fun delete(file: File): Boolean {
+        if (!file.exists()) return false
+        deleteConversationFiles(file)
+        return true
+    }
 }

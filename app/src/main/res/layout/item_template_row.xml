@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="38dp"
+    android:paddingEnd="12dp"
+    android:paddingVertical="10dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/tvTemplateBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="6dp"
+            android:paddingVertical="2dp"
+            android:textSize="10dp"
+            tools:text="Available" />
+
+        <TextView
+            android:id="@+id/tvTemplateLabel"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:textColor="@color/colorTextPrimary"
+            android:textSize="13dp"
+            tools:text="recipient=Zhang San" />
+
+        <TextView
+            android:id="@+id/tvSuccessRate"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:textColor="@color/colorTextTertiary"
+            android:textSize="11dp"
+            tools:text="3/4 (75%)" />
+
+        <ImageView
+            android:id="@+id/btnViewTemplateDetail"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_marginStart="4dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:padding="5dp"
+            android:src="@android:drawable/ic_menu_info_details"
+            android:tint="@color/colorTextSecondary"
+            tools:ignore="UseAppTint" />
+
+        <ImageView
+            android:id="@+id/btnDeleteTemplate"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_marginStart="4dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:padding="5dp"
+            android:src="@android:drawable/ic_menu_delete"
+            android:tint="@color/colorTextSecondary"
+            tools:ignore="UseAppTint" />
+
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tvTemplateEnv"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textColor="@color/colorTextTertiary"
+        android:textSize="11dp"
+        tools:text="v8.0.43 · 1080x2400 · Xiaomi 13 · zh" />
+
+</LinearLayout>

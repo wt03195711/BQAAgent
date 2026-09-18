@@ -150,6 +150,11 @@ class OpenAiLlmClient(
             ?: throw RuntimeException("OpenAI-compatible response has no message")
 
         val text = if (message.isNull("content")) "" else message.optString("content")
+        val reasoningText = if (message.isNull("reasoning_content")) {
+            null
+        } else {
+            message.optString("reasoning_content").takeIf { it.isNotBlank() }
+        }
         val toolCalls = parseToolCalls(message.optJSONArray("tool_calls"))
         val usage = root.optJSONObject("usage")?.let {
             TokenUsage(
@@ -164,7 +169,8 @@ class OpenAiLlmClient(
             text = text,
             toolExecutionRequests = toolCalls,
             tokenUsage = usage,
-            modelName = modelName
+            modelName = modelName,
+            reasoningText = reasoningText
         )
     }
 

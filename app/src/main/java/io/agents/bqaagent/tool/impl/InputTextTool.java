@@ -13,12 +13,18 @@ import io.agents.bqaagent.tool.ToolResult;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Collections;
 
 public class InputTextTool extends BaseTool {
 
     @Override
     public String getName() {
         return "input_text";
+    }
+
+    @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("text");
     }
 
     @Override

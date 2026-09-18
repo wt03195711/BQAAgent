@@ -28,6 +28,11 @@ public class SendMessageTool extends BaseTool {
     public String getName() { return "send_message"; }
 
     @Override
+    public List<String> getValueParamNames() {
+        return Arrays.asList("contact", "message", "app");
+    }
+
+    @Override
     public String getDisplayName() { return "Send Message"; }
 
     @Override

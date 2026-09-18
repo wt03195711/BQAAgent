@@ -12,6 +12,7 @@ import io.agents.bqaagent.tool.ToolParameter;
 import io.agents.bqaagent.tool.ToolResult;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +25,11 @@ public class TapVisibleTextTool extends BaseTool {
     @Override
     public String getName() {
         return "tap_visible_text";
+    }
+
+    @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("text");
     }
 
     @Override

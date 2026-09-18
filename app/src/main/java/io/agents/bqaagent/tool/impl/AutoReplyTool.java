@@ -27,6 +27,11 @@ public class AutoReplyTool extends BaseTool {
     }
 
     @Override
+    public List<String> getValueParamNames() {
+        return Arrays.asList("contact", "app");
+    }
+
+    @Override
     public String getDisplayName() {
         return "Auto Reply";
     }

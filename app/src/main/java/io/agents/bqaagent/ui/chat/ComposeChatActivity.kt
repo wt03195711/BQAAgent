@@ -13,8 +13,11 @@ import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.Modifier
 import io.agents.bqaagent.TaskEvent
 import io.agents.bqaagent.adb.LocalAdbDeviceDriver
 import io.agents.bqaagent.agent.llm.ModelConfigRepository
@@ -22,6 +25,7 @@ import io.agents.bqaagent.automation.ExternalAutomationContract
 import io.agents.bqaagent.automation.ExternalAutomationEntrypoint
 import io.agents.bqaagent.appViewModel
 import io.agents.bqaagent.floating.FloatingCircleManager
+import io.agents.bqaagent.recording.TaskRecordingCoordinator
 import io.agents.bqaagent.ui.settings.LlmConfigActivity
 import io.agents.bqaagent.ui.settings.SettingsActivity
 import io.agents.bqaagent.utils.KVUtils
@@ -52,7 +56,8 @@ class ComposeChatActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            Toast.makeText(this, "麦克风权限已授予，再次点击麦克风即可语音输入", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "麦克风权限已授予，再次点击麦克风即可语音输入", Toast.LENGTH_SHORT)
+                .show()
         } else {
             Toast.makeText(this, "麦克风权限被拒绝，无法使用语音输入", Toast.LENGTH_SHORT).show()
         }
@@ -70,7 +75,11 @@ class ComposeChatActivity : ComponentActivity() {
         try {
             val mimeType = contentResolver.getType(uri)
             if (mimeType == null || !mimeType.startsWith("image/")) {
-                Toast.makeText(this, "⚠️ Please select an image file (PNG, JPEG, WebP).", Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    this,
+                    "⚠️ Please select an image file (PNG, JPEG, WebP).",
+                    Toast.LENGTH_LONG
+                ).show()
                 appViewModel.provideUserImage(null)
                 return@registerForActivityResult
             }
@@ -79,12 +88,20 @@ class ComposeChatActivity : ComponentActivity() {
             val maxSize = 20L * 1024 * 1024
             if (fileSize > maxSize) {
                 val sizeMb = fileSize / (1024 * 1024)
-                Toast.makeText(this, "⚠️ Image too large (${sizeMb}MB). Maximum is 20MB.", Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    this,
+                    "⚠️ Image too large (${sizeMb}MB). Maximum is 20MB.",
+                    Toast.LENGTH_LONG
+                ).show()
                 appViewModel.provideUserImage(null)
                 return@registerForActivityResult
             }
             if (fileSize < 10L * 1024) {
-                Toast.makeText(this, "⚠️ Image too small. Please upload a full-screen screenshot.", Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    this,
+                    "⚠️ Image too small. Please upload a full-screen screenshot.",
+                    Toast.LENGTH_LONG
+                ).show()
                 appViewModel.provideUserImage(null)
                 return@registerForActivityResult
             }
@@ -100,11 +117,15 @@ class ComposeChatActivity : ComponentActivity() {
                 mimeType.contains("png") -> "png"
                 else -> "png"
             }
-            destFile = java.io.File(uploadDir, "screenshot_${System.currentTimeMillis()}.$extension")
+            destFile =
+                java.io.File(uploadDir, "screenshot_${System.currentTimeMillis()}.$extension")
             contentResolver.openInputStream(uri)?.use { input ->
                 destFile!!.outputStream().use { output -> input.copyTo(output) }
             }
-            XLog.i(TAG, "User image saved to ${destFile!!.absolutePath} (${fileSize / 1024}KB, $mimeType)")
+            XLog.i(
+                TAG,
+                "User image saved to ${destFile!!.absolutePath} (${fileSize / 1024}KB, $mimeType)"
+            )
             appViewModel.provideUserImage(destFile!!.absolutePath)
         } catch (e: Exception) {
             XLog.e(TAG, "Failed to save user image", e)
@@ -120,15 +141,18 @@ class ComposeChatActivity : ComponentActivity() {
     private val _messages = mutableStateListOf<ChatMessage>()
     private val _modelStatus = mutableStateOf("No model loaded")
     private val _isLocalModelActive = mutableStateOf(ModelConfigRepository.isLocalActive())
-    private val _usesExplicitInputModes = mutableStateOf(ModelConfigRepository.activeModelUsesExplicitInputModes())
+    private val _usesExplicitInputModes =
+        mutableStateOf(ModelConfigRepository.activeModelUsesExplicitInputModes())
     private val _needsPermission = mutableStateOf(false)
     private val _isAwaitingReply = mutableStateOf(false)
     private val _isTaskRunning = mutableStateOf(false)
-    private val _inputEnabled = mutableStateOf(true)    // False when model not ready (no task running)
+    private val _inputEnabled =
+        mutableStateOf(true)    // False when model not ready (no task running)
     private val _conversations = mutableStateListOf<ChatHistoryManager.ConversationSummary>()
     private val _isDownloading = mutableStateOf(false)
     private val _downloadProgress = mutableStateOf(0)
     private val _voiceEnabled = mutableStateOf(KVUtils.isVoiceInputEnabled())
+
     // Session-level token tracking for chat mode
     private val _sessionTokens = mutableStateOf(0)
     private val _sessionCost = mutableStateOf(0.0)
@@ -138,7 +162,7 @@ class ComposeChatActivity : ComponentActivity() {
     private var pendingExternalReturnPackage: String? = null
     private var lastAutomationSignature: String? = null
     private var lastAutomationAtMs: Long = 0L
-
+    private var lastSeenSkillCaptureMode: Boolean = KVUtils.isSkillCaptureModeEnabled()
     private val chatSessionController by lazy {
         ChatSessionController(
             activity = this,
@@ -204,7 +228,8 @@ class ComposeChatActivity : ComponentActivity() {
             } else {
                 XLog.d(TAG, "onCreate: task running, keeping floating circle visible")
             }
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
 
         // Check for updates
         io.agents.bqaagent.utils.UpdateChecker.checkForUpdate(this)
@@ -218,73 +243,137 @@ class ComposeChatActivity : ComponentActivity() {
 
         setContent {
             val activeTasks by activeTaskShellController.activeTasks.collectAsState()
+            val skillSaveOverlayState by taskFlowController.skillSaveOverlay
 
-            ChatScreen(
-                messages = _messages.toList(),
-                modelStatus = _modelStatus.value,
-                needsPermission = _needsPermission.value,
-                isAwaitingReply = _isAwaitingReply.value,
-                isTaskRunning = _isTaskRunning.value,
-                inputEnabled = _inputEnabled.value,
-                isDownloading = _isDownloading.value,
-                downloadProgress = _downloadProgress.value,
-                isLocalModel = _isLocalModelActive.value,
-                usesExplicitInputModes = _usesExplicitInputModes.value,
-                sessionTokens = _sessionTokens.value,
-                sessionCost = _sessionCost.value,
-                onSendChat = { sendChat(it) },
-                onSendTask = { taskFlowController.sendTask(it) },
-                onSendUnified = { sendUnifiedInput(it) },
-                onStartMonitor = { target -> taskFlowController.startMonitor(target) },
-                onSendDirectMessage = { contact, app, message ->
-                    taskFlowController.sendTask("send \"$message\" to $contact on $app")
-                },
-                onNewChat = { newChat() },
-                onOpenSettings = { startActivity(Intent(this, SettingsActivity::class.java)) },
-                onOpenModels = { startActivity(Intent(this, LlmConfigActivity::class.java)) },
-                onFixPermissions = { startActivity(Intent(this, SettingsActivity::class.java)) },
-                onAttach = { Toast.makeText(this, "Image upload coming soon", Toast.LENGTH_SHORT).show() },
-                conversations = _conversations.toList(),
-                onSelectConversation = { loadConversation(it) },
-                onDeleteConversation = { conv ->
-                    val deleted = conversationStore.deleteConversation(conv)
-                    XLog.i(TAG, "Delete conversation: ${conv.file.absolutePath} deleted=$deleted")
-                    refreshSidebarHistory()
-                },
-                onRenameConversation = { conv, newName ->
-                    val renamed = conversationStore.renameConversation(conv, newName)
-                    XLog.i(TAG, "Rename conversation: '${conv.title}' → '$newName' renamed=$renamed")
-                    refreshSidebarHistory()
-                },
-                activeTasks = activeTasks,
-                onStopTask = { contact ->
-                    _isTaskRunning.value = appViewModel.isTaskRunning()
-                    Toast.makeText(
-                        this,
-                        activeTaskShellController.stopTask(contact),
-                        Toast.LENGTH_SHORT
-                    ).show()
-                },
-                onStopAllTasks = {
-                    _isAwaitingReply.value = false
-                    _isTaskRunning.value = false
-                    Toast.makeText(
-                        this,
-                        activeTaskShellController.stopAllTasks(),
-                        Toast.LENGTH_SHORT
-                    ).show()
-                },
-                onModelSwitch = { modelId, displayName -> switchModel(modelId, displayName) },
-                colors = composeColors,
-                voiceEnabled = _voiceEnabled.value,
-                // 新增语音权限申请回调
-                onRequestRecordPermission = {
-                    recordAudioLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                },
-                showUserImageUpload = taskFlowController.showUserImageUpload,
-                onUploadImage = { userImagePickerLauncher.launch("image/*") },
-                onSkipImageUpload = { appViewModel.provideUserImage(null) },
-            )
+            Box(modifier = Modifier.fillMaxSize()) {
+                ChatScreen(
+                    messages = _messages.toList(),
+                    modelStatus = _modelStatus.value,
+                    needsPermission = _needsPermission.value,
+                    isAwaitingReply = _isAwaitingReply.value,
+                    isTaskRunning = _isTaskRunning.value,
+                    inputEnabled = _inputEnabled.value,
+                    isDownloading = _isDownloading.value,
+                    downloadProgress = _downloadProgress.value,
+                    isLocalModel = _isLocalModelActive.value,
+                    usesExplicitInputModes = _usesExplicitInputModes.value,
+                    sessionTokens = _sessionTokens.value,
+                    sessionCost = _sessionCost.value,
+                    onSendChat = { sendChat(it) },
+                    onSendTask = { taskFlowController.sendTask(it) },
+                    onSendUnified = { sendUnifiedInput(it) },
+                    onStartMonitor = { target -> taskFlowController.startMonitor(target) },
+                    onSendDirectMessage = { contact, app, message ->
+                        taskFlowController.sendTask("send \"$message\" to $contact on $app")
+                    },
+                    onNewChat = { newChat() },
+                    onOpenSettings = {
+                        startActivity(
+                            Intent(
+                                this@ComposeChatActivity,
+                                SettingsActivity::class.java
+                            )
+                        )
+                    },
+                    onOpenModels = {
+                        startActivity(
+                            Intent(
+                                this@ComposeChatActivity,
+                                LlmConfigActivity::class.java
+                            )
+                        )
+                    },
+                    onFixPermissions = {
+                        startActivity(
+                            Intent(
+                                this@ComposeChatActivity,
+                                SettingsActivity::class.java
+                            )
+                        )
+                    },
+                    onAttach = {
+                        Toast.makeText(
+                            this@ComposeChatActivity,
+                            "Image upload coming soon",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    conversations = _conversations.toList(),
+                    onSelectConversation = { loadConversation(it) },
+                    onDeleteConversation = { conv ->
+                        val deleted = conversationStore.deleteConversation(conv)
+                        XLog.i(
+                            TAG,
+                            "Delete conversation: ${conv.file.absolutePath} deleted=$deleted"
+                        )
+                        refreshSidebarHistory()
+                    },
+                    onRenameConversation = { conv, newName ->
+                        val renamed = conversationStore.renameConversation(conv, newName)
+                        XLog.i(
+                            TAG,
+                            "Rename conversation: '${conv.title}' → '$newName' renamed=$renamed"
+                        )
+                        refreshSidebarHistory()
+                    },
+                    activeTasks = activeTasks,
+                    onStopTask = { contact ->
+                        _isTaskRunning.value = appViewModel.isTaskRunning()
+                        Toast.makeText(
+                            this@ComposeChatActivity,
+                            activeTaskShellController.stopTask(contact),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    onStopAllTasks = {
+                        _isAwaitingReply.value = false
+                        _isTaskRunning.value = false
+                        Toast.makeText(
+                            this@ComposeChatActivity,
+                            activeTaskShellController.stopAllTasks(),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    onModelSwitch = { modelId, displayName -> switchModel(modelId, displayName) },
+                    colors = composeColors,
+                    voiceEnabled = _voiceEnabled.value,
+                    // 新增语音权限申请回调
+                    onRequestRecordPermission = {
+                        recordAudioLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    },
+                    showUserImageUpload = taskFlowController.showUserImageUpload,
+                    onUploadImage = { userImagePickerLauncher.launch("image/*") },
+                    onSkipImageUpload = { appViewModel.provideUserImage(null) },
+                    skillSaveState = skillSaveOverlayState,
+                    onOpenSkillSaveDetail = { taskFlowController.showSkillSaveDetail() },
+                    onDismissSkillSave = { taskFlowController.dismissSkillSave() },
+                    onSkillSaveTitleChanged = { taskFlowController.updateSkillSaveTitle(it) },
+                    onConfirmSkillSave = { taskFlowController.confirmSkillSave() },
+                    onRetrySkillSave = { taskFlowController.retrySkillSave() },
+                    onOpenRecording = { recordingId ->
+                        io.agents.bqaagent.ui.recording.RecordingPlaybackActivity.start(
+                            this@ComposeChatActivity, recordingId
+                        )
+                    },
+                )
+
+                SkillSaveOverlay(
+                    state = if (skillSaveOverlayState is SkillSaveOverlayState.OfferSave) {
+                        // OfferSave is rendered inline in the chat list footer, not as a modal.
+                        SkillSaveOverlayState.Hidden
+                    } else {
+                        // ShowDetail / Saving / Success / Fail / SkillLimitReached / OfferReplay stay modal.
+                        skillSaveOverlayState
+                    },
+                    colors = composeColors,
+                    onOpenDetail = { taskFlowController.showSkillSaveDetail() },
+                    onDismiss = { taskFlowController.dismissSkillSave() },
+                    onTitleChanged = { taskFlowController.updateSkillSaveTitle(it) },
+                    onConfirmSave = { taskFlowController.confirmSkillSave() },
+                    onRetry = { taskFlowController.retrySkillSave() },
+                    onOpenSkillManagement = { taskFlowController.openSkillManagementFromLimit() },
+                )
+            }
         }
 
         refreshSidebarHistory()
@@ -333,12 +422,15 @@ class ComposeChatActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Recording tail-off waits for this flag so the return-to-chat moment is captured.
+        TaskRecordingCoordinator.onChatResumed()
         _needsPermission.value =
             AppCapabilityCoordinator.localAdbState(this) != ServiceBindingState.READY
         refreshModelModeState()
         _isTaskRunning.value = appViewModel.isTaskRunning()
         _voiceEnabled.value = KVUtils.isVoiceInputEnabled()
         refreshSidebarHistory()
+        notifySkillCaptureModeChangedIfAny()
         permHandler.removeCallbacks(permPoller)
         permHandler.postDelayed(permPoller, 1000)
         activeTaskShellController.onResume()
@@ -352,6 +444,7 @@ class ComposeChatActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
+        TaskRecordingCoordinator.onChatPaused()
         saveChat()
         permHandler.removeCallbacks(permPoller)
         activeTaskShellController.onPause()
@@ -378,20 +471,27 @@ class ComposeChatActivity : ComponentActivity() {
         }
     }
 
-    private fun shouldRouteUnifiedInputToTask(text: String): Boolean {
-        val lower = text.trim().lowercase(Locale.ROOT)
-        if (lower.isBlank()) return false
+    /**
+     * Minimal small-talk fast path. After normalization (lowercase, punctuation/whitespace stripped)
+     * an exact match against this set routes to plain chat; everything else goes to the task pipeline.
+     */
+    private val smallTalkPhrases = setOf(
+        "hi", "hello", "hey", "yo", "sup", "whatsup",
+        "goodmorning", "goodafternoon", "goodevening", "goodnight",
+        "howareyou", "thanks", "thankyou", "bye", "goodbye", "ok", "okay",
+        "你好", "您好", "在吗", "在么", "在不在", "嗨", "哈喽",
+        "早安", "早上好", "中午好", "下午好", "晚上好",
+        "谢谢", "多谢", "再见", "拜拜"
+    )
 
-        val taskSignals = listOf(
-            "open ", "launch ", "start ", "tap ", "click ", "press ", "type ", "input ",
-            "send ", "transfer", "pay ", "login", "log in", "scroll ", "swipe ", "install ",
-            "call ", "dial ", "monitor ", "reply ", "close ", "go to ", "navigate ",
-            "screenshot", "notification", "read my", "check my",
-            "打开", "启动", "点击", "点开", "点一下", "点 ", "点“", "点\"", "输入", "发送", "转账", "付款", "登录",
-            "滑动", "滚动", "安装", "拨打", "监控", "回复", "返回", "回到", "截屏",
-            "通知", "查看我的", "读取我的"
-        )
-        return taskSignals.any { lower.contains(it) }
+    private fun shouldRouteUnifiedInputToTask(text: String): Boolean {
+        val normalized = text.trim().lowercase(Locale.ROOT)
+            .replace(Regex("[\\p{Punct}\\p{Space}]+"), "")
+        if (normalized.isEmpty()) return false
+        // Route inversion: the unified entry is a task by default. The AgentLoop LLM distinguishes a
+        // real device task from chat-only (finish status=not_a_task). Only an explicit small-talk
+        // phrase takes the lightweight chat fast path, eliminating keyword false-negatives.
+        return !smallTalkPhrases.contains(normalized)
     }
 
     private fun handleIntentAutomation(intent: Intent?, initialDelayMs: Long) {
@@ -433,7 +533,12 @@ class ComposeChatActivity : ComponentActivity() {
                 }
                 if (!KVUtils.hasLlmConfig()) {
                     _messages.add(ChatMessage(ChatMessage.Role.USER, automationText))
-                    _messages.add(ChatMessage(ChatMessage.Role.SYSTEM, "Configure LLM in Settings first."))
+                    _messages.add(
+                        ChatMessage(
+                            ChatMessage.Role.SYSTEM,
+                            "Configure LLM in Settings first."
+                        )
+                    )
                     saveChat()
                     return
                 }
@@ -447,7 +552,8 @@ class ComposeChatActivity : ComponentActivity() {
     }
 
     private fun shouldDeferLocalChatBootstrap(intent: Intent?): Boolean {
-        val taskText = intent?.getStringExtra(EXTRA_TASK)?.takeIf { it.isNotBlank() } ?: return false
+        val taskText =
+            intent?.getStringExtra(EXTRA_TASK)?.takeIf { it.isNotBlank() } ?: return false
         return taskText.isNotBlank() && ModelConfigRepository.isLocalActive()
     }
 
@@ -456,9 +562,12 @@ class ComposeChatActivity : ComponentActivity() {
         pendingExternalReturnAction = null
         pendingExternalReturnPackage = null
         if (!isTask) return
-        pendingExternalRequestId = intent?.getStringExtra(ExternalAutomationEntrypoint.EXTRA_EXTERNAL_REQUEST_ID)
-        pendingExternalReturnAction = intent?.getStringExtra(ExternalAutomationEntrypoint.EXTRA_EXTERNAL_RETURN_ACTION)
-        pendingExternalReturnPackage = intent?.getStringExtra(ExternalAutomationEntrypoint.EXTRA_EXTERNAL_RETURN_PACKAGE)
+        pendingExternalRequestId =
+            intent?.getStringExtra(ExternalAutomationEntrypoint.EXTRA_EXTERNAL_REQUEST_ID)
+        pendingExternalReturnAction =
+            intent?.getStringExtra(ExternalAutomationEntrypoint.EXTRA_EXTERNAL_RETURN_ACTION)
+        pendingExternalReturnPackage =
+            intent?.getStringExtra(ExternalAutomationEntrypoint.EXTRA_EXTERNAL_RETURN_PACKAGE)
     }
 
     private fun sendExternalAutomationTerminalCallback(event: TaskEvent) {
@@ -473,18 +582,22 @@ class ComposeChatActivity : ComponentActivity() {
                 status = ExternalAutomationContract.STATUS_COMPLETED
                 result = event.answer
             }
+
             is TaskEvent.Failed -> {
                 status = ExternalAutomationContract.STATUS_FAILED
                 error = event.error
             }
+
             is TaskEvent.Cancelled -> {
                 status = ExternalAutomationContract.STATUS_CANCELLED
                 error = "Task cancelled."
             }
-            is TaskEvent.Blocked -> {
-                status = ExternalAutomationContract.STATUS_BLOCKED
-                error = "Task blocked by a system dialog."
+
+            is TaskEvent.Stopped -> {
+                status = ExternalAutomationContract.STATUS_STOPPED
+                error = event.message
             }
+
             else -> return
         }
         ExternalAutomationContract.sendCallback(
@@ -524,28 +637,47 @@ class ComposeChatActivity : ComponentActivity() {
     }
 
     private fun newChat() {
-        val session = conversationStore.startNewConversation(_messages, currentConversationModelName())
+        val session =
+            conversationStore.startNewConversation(_messages, currentConversationModelName())
         syncSidebar(session.conversations)
         _messages.clear()
         _sessionTokens.value = 0
         _sessionCost.value = 0.0
         _isAwaitingReply.value = false
         _isTaskRunning.value = false
+        taskFlowController.clearSkillSavePrompt()
         chatSessionController.startNewConversationRuntime()
     }
 
     private fun loadConversation(conv: ChatHistoryManager.ConversationSummary) {
-        val session = conversationStore.openConversation(conv, _messages, currentConversationModelName())
+        val session =
+            conversationStore.openConversation(conv, _messages, currentConversationModelName())
         syncSidebar(session.conversations)
         _messages.clear()
         _messages.addAll(session.messages)
         _isAwaitingReply.value = false
         _isTaskRunning.value = false
+        taskFlowController.clearSkillSavePrompt()
         chatSessionController.restoreConversationRuntime(session.conversationId, session.messages)
     }
 
     private fun saveChat() {
         syncSidebar(conversationStore.saveCurrent(_messages, currentConversationModelName()))
+    }
+
+    private fun notifySkillCaptureModeChangedIfAny() {
+        val current = KVUtils.isSkillCaptureModeEnabled()
+        if (current == lastSeenSkillCaptureMode) return
+        lastSeenSkillCaptureMode = current
+        if (current) {
+            _messages.add(
+                ChatMessage(
+                    ChatMessage.Role.SYSTEM,
+                    "Skill Capture Mode enabled: tasks run independently without chat history and can be saved as skills. Please describe each task completely in one message."
+                )
+            )
+            saveChat()
+        }
     }
 
     private fun refreshSidebarHistory() {

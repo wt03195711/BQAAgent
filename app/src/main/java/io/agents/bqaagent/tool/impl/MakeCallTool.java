@@ -17,6 +17,7 @@ import io.agents.bqaagent.tool.ToolResult;
 import io.agents.bqaagent.utils.XLog;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -31,6 +32,11 @@ public class MakeCallTool extends BaseTool {
 
     @Override
     public String getName() { return "make_call"; }
+
+    @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("contact");
+    }
 
     @Override
     public String getDisplayName() { return "Make Call"; }

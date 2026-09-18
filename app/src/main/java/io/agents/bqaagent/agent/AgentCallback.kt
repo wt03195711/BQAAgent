@@ -3,6 +3,7 @@
 
 package io.agents.bqaagent.agent
 
+import io.agents.bqaagent.TaskStatus
 import io.agents.bqaagent.tool.ToolResult
 
 interface AgentCallback {
@@ -15,7 +16,14 @@ interface AgentCallback {
     fun onToolCall(round: Int, toolId: String, toolName: String, parameters: String)
     fun onToolResult(round: Int, toolId: String, toolName: String, parameters: String, result: ToolResult)
     fun onTokenUpdate(status: TokenMonitor.Status) {}
-    fun onComplete(round: Int, finalAnswer: String, totalTokens: Int, modelName: String? = null)
+    fun onComplete(
+        round: Int,
+        finalAnswer: String,
+        totalTokens: Int,
+        modelName: String?,
+        status: TaskStatus,
+        reasonCode: String? = null
+    )
     fun onError(round: Int, error: Exception, totalTokens: Int)
     fun onSystemDialogBlocked(round: Int, totalTokens: Int)
     /**

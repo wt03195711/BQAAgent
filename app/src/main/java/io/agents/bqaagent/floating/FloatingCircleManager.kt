@@ -45,7 +45,9 @@ object FloatingCircleManager {
         TASK_NOTIFY,    // task notification received (pill expanded)
         RUNNING,        // task running
         SUCCESS,        // task completed
-        ERROR           // task failed
+        ERROR,          // task failed
+        STOPPED,        // task stopped by system rule / permission
+        CANCELLED       // task cancelled by user
     }
 
     private var isShowing = false
@@ -297,6 +299,26 @@ object FloatingCircleManager {
     }
 
     /**
+     * Switch to task stopped state — system-decided termination (auto-resets to IDLE after 5 seconds)
+     */
+    fun setStoppedState() {
+        ThreadUtils.runOnUiThread {
+            setState(State.STOPPED)
+            scheduleAutoReset()
+        }
+    }
+
+    /**
+     * Switch to task cancelled state — user-initiated (auto-resets to IDLE after 5 seconds)
+     */
+    fun setCancelledState() {
+        ThreadUtils.runOnUiThread {
+            setState(State.CANCELLED)
+            scheduleAutoReset()
+        }
+    }
+
+    /**
      * Set state
      */
     private fun setState(state: State) {
@@ -317,6 +339,8 @@ object FloatingCircleManager {
         val cardRunning = view.findViewById<View>(R.id.cardRunning)
         val cardSuccess = view.findViewById<View>(R.id.cardSuccess)
         val cardError = view.findViewById<View>(R.id.cardError)
+        val cardStopped = view.findViewById<View>(R.id.cardStopped)
+        val cardCancelled = view.findViewById<View>(R.id.cardCancelled)
 
         // Hide all state views
         cardIdle?.visibility = View.GONE
@@ -324,6 +348,8 @@ object FloatingCircleManager {
         cardRunning?.visibility = View.GONE
         cardSuccess?.visibility = View.GONE
         cardError?.visibility = View.GONE
+        cardStopped?.visibility = View.GONE
+        cardCancelled?.visibility = View.GONE
 
         // Cancel any previous auto-reset
         cancelAutoReset()
@@ -366,6 +392,16 @@ object FloatingCircleManager {
             State.ERROR -> {
                 cancelNotifyCollapse()
                 cardError?.visibility = View.VISIBLE
+                setFloatRootWidth(view, getCircleWidth(view))
+            }
+            State.STOPPED -> {
+                cancelNotifyCollapse()
+                cardStopped?.visibility = View.VISIBLE
+                setFloatRootWidth(view, getCircleWidth(view))
+            }
+            State.CANCELLED -> {
+                cancelNotifyCollapse()
+                cardCancelled?.visibility = View.VISIBLE
                 setFloatRootWidth(view, getCircleWidth(view))
             }
         }

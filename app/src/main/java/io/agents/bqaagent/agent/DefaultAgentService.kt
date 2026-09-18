@@ -8,6 +8,9 @@ import android.util.DisplayMetrics
 import android.view.WindowManager
 import io.agents.bqaagent.ClawApplication
 import io.agents.bqaagent.R
+import io.agents.bqaagent.FinishStatus
+import io.agents.bqaagent.TaskReasonCode
+import io.agents.bqaagent.TaskStatus
 import io.agents.bqaagent.agent.langchain.LangChain4jToolBridge
 import io.agents.bqaagent.agent.llm.LlmClient
 import io.agents.bqaagent.agent.llm.LlmClientFactory
@@ -19,6 +22,7 @@ import io.agents.bqaagent.adb.LocalAdbDeviceDriver
 import io.agents.bqaagent.tool.ToolRegistry
 import io.agents.bqaagent.tool.impl.GetScreenInfoTool
 import io.agents.bqaagent.tool.ToolResult
+import io.agents.bqaagent.agent.skill.SkillRecorder
 import io.agents.bqaagent.utils.XLog
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -29,6 +33,7 @@ import dev.langchain4j.data.message.ToolExecutionResultMessage
 import dev.langchain4j.data.message.UserMessage
 import dev.langchain4j.agent.tool.ToolExecutionRequest
 import dev.langchain4j.agent.tool.ToolSpecification
+import io.agents.bqaagent.utils.ScreenSettleWaiter
 import java.io.File
 import java.util.LinkedList
 import java.util.concurrent.ExecutorService
@@ -52,7 +57,7 @@ class DefaultAgentService : AgentService {
 1. Use the current screen already provided in the prompt when present.
 2. Pick one tool call.
 3. If an action result includes "Screen after action", use that snapshot for the next decision instead of calling get_screen_info again.
-4. Call finish(summary="actual result") when done.
+4. End every task by calling finish with a status: finish(status="success", summary="actual result") when the goal is achieved, finish(status="failed", summary="why it cannot be done") when it cannot be completed, or finish(status="not_a_task", summary="your reply") when the user was only chatting.
 
 ## Tool habits
 - Open apps with open_app(package_name="Chrome" or package_name="com.android.chrome"). Do not call get_installed_apps just to open an app.
@@ -60,11 +65,12 @@ class DefaultAgentService : AgentService {
 - Tap visible nodes with tap_node(node_id="n3") when possible; use tap coordinates only if node IDs are unavailable.
 - Type with input_text. Press enter/back/home with system_key.
 - Use scroll_to_find or find_and_tap for off-screen text.
-- Use get_screen_info(mode="compact") by default. Use form/actionable/text for focused views. Use full only for debugging.
+- Screen data is always compact mode; do not try to switch modes. One [rowN] line may contain MULTIPLE elements, each with its OWN [nX] id and tap=(x,y). To click a specific button, use that button's own id via tap_node(node_id="nX"); never reuse another element's id or coordinates.
 
 ## Rules
 - One tool call per turn.
-- If the same approach fails 3 times, finish with the limitation.
+- Before every tool call, include ONE short sentence (at most 15 words) in the reply text describing the action and its purpose, e.g. "Open Settings to enable dark mode". Write it as neutral third-person narration: no "I"/"let's", no fillers like "Okay"/"Now". This sentence is separate from tool parameters and never replaces any tool argument.
+- If the same approach fails 3 times, call finish(status="failed", summary="what went wrong and what the user can try").
 - Summaries must include the actual data found, not just "I checked".
 - For passwords and financial final actions, follow any later task-specific policy. If no task-specific policy allows the action, stop before entering sensitive credentials or finalizing financial actions. Never delete data."""
 
@@ -88,7 +94,9 @@ class DefaultAgentService : AgentService {
         )
         private val SKIP_AUTO_SCREEN_AFTER_ACTION = setOf("scroll_to_find", "bank_own_account_transfer")
         /** ms to wait for UI to settle before capturing screen after an action */
-        private const val SCREEN_SETTLE_MS = 500L
+        private const val SCREEN_SETTLE_MS = 2000L
+        /** Extract quoted labels from screen tree output; both compact and text modes wrap labels in double quotes */
+        private val ANCHOR_QUOTED_LABEL_REGEX = Regex("\"([^\"]{2,60})\"")
         private const val UNUSABLE_SCREEN_PREFIX = "SCREEN_TREE_UNUSABLE"
         private const val SENSITIVE_HARD_TOKEN_LIMIT = 400_000
         private const val DUMP_ONLY_HARD_TOKEN_LIMIT = 180_000
@@ -205,11 +213,6 @@ class DefaultAgentService : AgentService {
             )
         }
 
-        private fun allowFullScreenInfo(request: String): Boolean {
-            val lower = request.lowercase()
-            return hasAny(lower, "full dump", "full tree", "full ui", "debug screen", "debug ui", "完整dump", "完整 dump")
-        }
-
         private fun activeToolNamesFor(
             request: String,
             dumpOnlyTask: Boolean,
@@ -306,6 +309,11 @@ class DefaultAgentService : AgentService {
         }
 
         private fun sensitiveAmountTerminalMessage(toolName: String, result: ToolResult, request: String): String? {
+            // Sensitive-mode isolation: this is a banking-domain rule and must not fire when
+            // sensitive mode is off. Otherwise a generic app's input_amount returning "BLOCKED:"
+            // (e.g. a disabled Continue/Next button) would wrongly terminate the task. Mirrors the
+            // self-guard in the sibling terminal functions (missingPinTerminalMessage etc.).
+            if (!SensitiveAppPolicy.isSensitiveTask(request)) return null
             if (toolName == "bank_own_account_transfer") {
                 result.data?.takeIf { it.contains("COMPLETED:") }?.let { data ->
                     return "Task completed by bank transfer flow. $data"
@@ -409,8 +417,8 @@ class DefaultAgentService : AgentService {
 
             override fun onTokenUpdate(status: TokenMonitor.Status) = callback.onTokenUpdate(status)
 
-            override fun onComplete(round: Int, finalAnswer: String, totalTokens: Int, modelName: String?) {
-                terminalCallback = { callback.onComplete(round, finalAnswer, totalTokens, modelName) }
+            override fun onComplete(round: Int, finalAnswer: String, totalTokens: Int, modelName: String?, status: TaskStatus, reasonCode: String?) {
+                terminalCallback = { callback.onComplete(round, finalAnswer, totalTokens, modelName, status, reasonCode) }
             }
 
             override fun onError(round: Int, error: Exception, totalTokens: Int) {
@@ -642,6 +650,22 @@ class DefaultAgentService : AgentService {
             }
         }
 
+        // 0b. full-mode dumps are single-use. Even when a full result is the latest
+        // get_screen_info (block 0 would protect it), collapse it as soon as a newer
+        // AiMessage exists after it — that means the LLM already read the full tree and
+        // produced its next decision, so the bulky full text must not pile up in history.
+        val lastAiIdxForFull = messages.indexOfLast { it is AiMessage }
+        for (i in messages.indices) {
+            val msg = messages[i]
+            if (msg is ToolExecutionResultMessage
+                && i < lastAiIdxForFull
+                && msg.text() != screenPlaceholder
+                && msg.text().contains("mode=full")
+            ) {
+                messages[i] = ToolExecutionResultMessage.from(msg.id(), msg.toolName(), screenPlaceholder)
+            }
+        }
+
         // 1. Find indices of all AiMessages; each represents one round
         val aiIndices = messages.indices.filter { messages[it] is AiMessage }
         val protectedRounds = keepRecentRounds.coerceAtLeast(1)
@@ -731,6 +755,12 @@ class DefaultAgentService : AgentService {
         val browserNavigationTask = isBrowserNavigationTask(rawUserRequest)
         LocalAdbDeviceDriver.invalidateScreenCache()
 
+        // Task-level screen mode, decided ONCE by provider and kept stable for the whole
+        // task (stability protects screen-change / stuck detection that compare hashes).
+        // LOCAL weak models -> compact (token-saving, row-grouped, Plan-A addressable).
+        // Cloud models -> detail (per-element id + class + enriched label + tap + bounds; richest).
+        val taskScreenMode = if (config.provider == LlmProvider.LOCAL) "compact" else "detail"
+
         // Build System Prompt — use optimized prompt for local LLM
         val basePrompt = if (config.provider == LlmProvider.LOCAL) {
             LOCAL_TASK_PROMPT
@@ -814,7 +844,7 @@ class DefaultAgentService : AgentService {
             try {
                 val screenTool = ToolRegistry.getInstance().getTool("get_screen_info")
                 if (screenTool != null) {
-                    val screenResult = screenTool.execute(mapOf("mode" to "compact"))
+                    val screenResult = screenTool.execute(mapOf("mode" to taskScreenMode))
                     if (screenResult.isSuccess && !screenResult.data.isNullOrBlank()) {
                         val candidateScreenData = screenResult.data
                         if (sensitiveTask && !SensitiveAppPolicy.isSensitiveAppScreen(candidateScreenData)) {
@@ -822,14 +852,14 @@ class DefaultAgentService : AgentService {
                             promptForModel
                         } else {
                             prewarmedScreenData = candidateScreenData
-                        XLog.i(TAG, "runAgentLoop: pre-warm screen attached (${prewarmedScreenData!!.length} chars)")
-                        SensitiveAppPolicy.missingCredentialTerminalMessage(prewarmedScreenData, rawUserRequest)?.let { terminal ->
-                            XLog.i(TAG, "Sensitive missing-credential terminal from pre-warm screen")
-                            callback.onComplete(0, terminal, 0, null)
-                            return
-                        }
-                        "$promptForModel\n\nCurrent screen:\n$prewarmedScreenData\n\n" +
-                            "Use this current screen snapshot for the first step. Do not call get_screen_info again before your first action unless the screen may have changed."
+                            XLog.i(TAG, "runAgentLoop: pre-warm screen attached (${prewarmedScreenData!!.length} chars)")
+                            SensitiveAppPolicy.missingCredentialTerminalMessage(prewarmedScreenData, rawUserRequest)?.let { terminal ->
+                                XLog.i(TAG, "Sensitive missing-credential terminal from pre-warm screen")
+                                callback.onComplete(0, terminal, 0, null, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
+                                return
+                            }
+                            "$promptForModel\n\nCurrent screen:\n$prewarmedScreenData\n\n" +
+                                "Use this current screen snapshot for the first step. Do not call get_screen_info again before your first action unless the screen may have changed."
                         }
                     } else promptForModel
                 } else promptForModel
@@ -839,6 +869,15 @@ class DefaultAgentService : AgentService {
             promptForModel
         }
         messages.add(UserMessage.from(enrichedPrompt))
+
+        // === Skill Recording: start recording at the beginning of the agent loop ===
+        try {
+            SkillRecorder.startRecording(
+                rawUserRequest = rawUserRequest,
+            )
+        } catch (e: Exception) {
+            XLog.w(TAG, "Failed to start skill recording", e)
+        }
 
         var iterations = 0
         var totalTokens = 0
@@ -858,6 +897,10 @@ class DefaultAgentService : AgentService {
         var sensitiveBankBatchAttempted = false
         var iterationsSinceLastVlm = 0
         var vlmAttempted = false
+        var vlmHinted = false
+        var actionAttemptCount = 0
+        var actionSuccessCount = 0
+        var textOnlyFinishNudged = false
         val traceTurnId = LlmTraceContext.newTurnId("agent", rawUserRequest)
         val tracePromptHash = LlmTraceContext.promptHash(rawUserRequest)
 
@@ -879,7 +922,12 @@ class DefaultAgentService : AgentService {
                 ?: result.error?.let { "Task stopped during bank transfer flow before unsafe final action. $it" }
                 ?: result.data?.let { "Task stopped during bank transfer flow before unsafe final action. $it" }
                 ?: "Task stopped during bank transfer flow before unsafe final action."
-            callback.onComplete(iterations, terminal, totalTokens, actualModelName)
+            val bankDone = terminal.startsWith("Task completed")
+            callback.onComplete(
+                iterations, terminal, totalTokens, actualModelName,
+                if (bankDone) TaskStatus.SUCCESS else TaskStatus.STOPPED,
+                if (bankDone) TaskReasonCode.TASK_SUCCESS else TaskReasonCode.SENSITIVE_POLICY
+            )
             return true
         }
 
@@ -906,20 +954,24 @@ class DefaultAgentService : AgentService {
                 keepRecentRounds = if (sensitiveTask) SENSITIVE_KEEP_RECENT_ROUNDS else KEEP_RECENT_ROUNDS
             )
 
-            // Periodic VLM hint: when VLM is configured and LLM hasn't tried it
-            // for several iterations, inject a conditional reminder.
-            // Covers both ADB unusable and ADB data incomplete scenarios.
+            // Periodic VLM hint (difficulty-gated, Fix C): only when VLM is configured,
+            // an unusable screen was ACTUALLY observed, and we have not already hinted or
+            // tried VLM. Injected at most once per task. A bare round-count no longer nags
+            // healthy, sparse-but-usable screens toward VLM.
             if (VlmConfigRepository.isConfigured()
-                && iterationsSinceLastVlm >= 4
                 && !vlmAttempted
+                && !vlmHinted
                 && iterations >= 4
+                && consecutiveUnusableScreens > 0
             ) {
+                vlmHinted = true
                 messages.add(UserMessage.from(
-                    "[VLM HINT] If you cannot find the target element in the current ADB UI data, " +
-                            "call analyze_screen_visual to get visual guidance. " +
-                            "Do NOT guess or click elements that are not related to your task."
+                    "[VLM HINT] The ADB UI tree is unusable on the current screen. " +
+                            "If a state-changing retry (wait/back/reopen) does not recover it, " +
+                            "call analyze_screen_visual for visual guidance. " +
+                            "Do NOT guess or click elements unrelated to your task."
                 ))
-                XLog.i(TAG, "Periodic VLM hint injected (gap=$iterationsSinceLastVlm)")
+                XLog.i(TAG, "Periodic VLM hint injected (difficulty-gated, gap=$iterationsSinceLastVlm)")
             }
 
             // LLM call (with retry)
@@ -940,7 +992,7 @@ class DefaultAgentService : AgentService {
                 }
             } catch (e: Exception) {
                 if (cancelled.get()) {
-                    XLog.i(TAG, "LLM call stopped after cancellation: ${e.message ?: e.javaClass.simpleName}")
+                    callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
                     return
                 }
                 XLog.e(TAG, "LLM API call failed after retries", e)
@@ -949,7 +1001,7 @@ class DefaultAgentService : AgentService {
             }
 
             if (cancelled.get()) {
-                callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName)
+                callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
                 return
             }
 
@@ -958,13 +1010,35 @@ class DefaultAgentService : AgentService {
                 actualModelName = llmResponse.modelName
                 XLog.d(TAG, "runAgentLoop: actual model from API = $actualModelName")
             }
+            // Extract the model's reasoning/intent text returned alongside tool calls,
+            // so the UI can show what the AI intends to do at each step.
+            // Priority: reply text (prompt requires a one-sentence intent)
+            //        → reasoning content (reasoning models) → tool calls themselves.
+            val stepIntent = (llmResponse.text?.takeIf { it.isNotBlank() } ?: llmResponse.reasoningText)
+                ?.replace(Regex("\\s+"), " ")
+                ?.trim()
+                .orEmpty()
+                .ifBlank {
+                    if (llmResponse.hasToolExecutionRequests()) {
+                        llmResponse.toolExecutionRequests.joinToString("; ") { req ->
+                            val name = req.name() ?: "unknown"
+                            val args = req.arguments()
+                                ?.replace(Regex("\\s+"), " ")
+                                ?.trim()
+                                ?.takeIf { it.isNotBlank() && it != "{}" }
+                                ?.take(200)
+                            if (args != null) "$name($args)" else name
+                        }
+                    } else ""
+                }
             // Accumulate token usage
             llmResponse.tokenUsage?.totalTokenCount()?.let { totalTokens += it }
             tokenMonitor.record(
                 step = iterations,
                 inputTokens = llmResponse.tokenUsage?.inputTokenCount(),
                 outputTokens = llmResponse.tokenUsage?.outputTokenCount(),
-                totalTokenCount = llmResponse.tokenUsage?.totalTokenCount()
+                totalTokenCount = llmResponse.tokenUsage?.totalTokenCount(),
+                intent = stepIntent
             )
             callback.onTokenUpdate(tokenMonitor.getStatus())
 
@@ -976,9 +1050,11 @@ class DefaultAgentService : AgentService {
                     callback.onComplete(
                         iterations,
                         "Task stopped: budget limit reached (${tokenStatus.formattedTokens} tokens, ${tokenStatus.formattedCost}). " +
-                        "Increase budget in Settings if needed.",
+                                "Increase budget in Settings if needed.",
                         totalTokens,
-                        actualModelName
+                        actualModelName,
+                        TaskStatus.STOPPED,
+                        TaskReasonCode.TOKEN_LIMIT
                     )
                     return
                 }
@@ -1012,9 +1088,11 @@ class DefaultAgentService : AgentService {
                 callback.onComplete(
                     iterations,
                     "Task stopped: safety token limit reached for this $taskType task " +
-                        "(${tokenStatus.formattedTokens}). The agent was likely stuck; try a narrower instruction or use open_url for direct navigation.",
+                            "(${tokenStatus.formattedTokens}). The agent was likely stuck; try a narrower instruction or use open_url for direct navigation.",
                     totalTokens,
-                    actualModelName
+                    actualModelName,
+                    TaskStatus.STOPPED,
+                    TaskReasonCode.TOKEN_LIMIT
                 )
                 return
             }
@@ -1047,7 +1125,6 @@ class DefaultAgentService : AgentService {
             }
 
             // No tool calls in this response — LLM chose to respond with text only.
-            // Respect that. If there's text, it's the answer. Done.
             if (!llmResponse.hasToolExecutionRequests()) {
                 val responseText = llmResponse.text ?: ""
                 if (responseText.isNotEmpty()) {
@@ -1069,13 +1146,31 @@ class DefaultAgentService : AgentService {
                         messages.add(UserMessage.from(correction))
                         continue
                     }
-                    XLog.i(TAG, "runAgentLoop: text-only response, completing")
-                    callback.onComplete(iterations, responseText, totalTokens, actualModelName)
+                    // Decision 3: a task-shaped turn answered with plain text and no tool call. Nudge
+                    // once for an explicit finish(status=...); if it STILL answers with text only, fall
+                    // back to device-action evidence to choose SUCCESS vs FAILED.
+                    if (!textOnlyFinishNudged) {
+                        textOnlyFinishNudged = true
+                        XLog.i(TAG, "runAgentLoop: text-only response, nudging once for finish(status)")
+                        messages.add(UserMessage.from(
+                            "[System Notice] Do not end the turn with plain text. Call the finish tool: " +
+                                    "finish(status=\"success\", summary=...) if the goal is achieved, " +
+                                    "finish(status=\"failed\", summary=...) if it cannot be completed, or " +
+                                    "finish(status=\"not_a_task\", summary=...) if this was only conversation."
+                        ))
+                        continue
+                    }
+                    XLog.i(TAG, "runAgentLoop: text-only response after nudge; classifying by evidence (successful actions=$actionSuccessCount)")
+                    if (actionSuccessCount > 0) {
+                        callback.onComplete(iterations, responseText, totalTokens, actualModelName, TaskStatus.SUCCESS, TaskReasonCode.TASK_SUCCESS)
+                    } else {
+                        callback.onComplete(iterations, responseText, totalTokens, actualModelName, TaskStatus.FAILED, TaskReasonCode.UNVERIFIED)
+                    }
                     return
                 }
-                // Empty response with no tools — something went wrong, finish
+                // Empty response with no tools — provisional terminal; a later real finish overrides it.
                 XLog.w(TAG, "runAgentLoop: empty response with no tools, finishing")
-                callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_completed), totalTokens, actualModelName)
+                callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_completed), totalTokens, actualModelName, TaskStatus.FAILED, TaskReasonCode.EMPTY_RESPONSE)
                 continue
             }
 
@@ -1085,7 +1180,7 @@ class DefaultAgentService : AgentService {
             // Execute tool calls
             for (toolRequest in llmResponse.toolExecutionRequests) {
                 if (cancelled.get()) {
-                    callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName)
+                    callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
                     return
                 }
 
@@ -1120,12 +1215,21 @@ class DefaultAgentService : AgentService {
                 }
                 if (params == null) params = HashMap()
 
-                if (toolName == "get_screen_info" &&
-                    params["mode"]?.toString()?.equals("full", ignoreCase = true) == true &&
-                    !allowFullScreenInfo(rawUserRequest)
-                ) {
-                    params = params.toMutableMap().apply { put("mode", "compact") }
-                    XLog.i(TAG, "get_screen_info full mode downgraded to compact for non-debug task")
+                if (toolName == "get_screen_info") {
+                    val requestedMode = params["mode"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                    if (config.provider == LlmProvider.LOCAL) {
+                        // LOCAL is locked to compact: ignore any other mode the model asks for.
+                        if (!requestedMode.equals("compact", ignoreCase = true)) {
+                            params = params.toMutableMap().apply { put("mode", "compact") }
+                            if (requestedMode != null) {
+                                XLog.i(TAG, "get_screen_info mode '$requestedMode' locked to compact for LOCAL provider")
+                            }
+                        }
+                    } else if (requestedMode == null) {
+                        // Cloud may choose any mode (detail/compact/text/full are all allowed);
+                        // when it does not specify one, default to the task mode (detail).
+                        params = params.toMutableMap().apply { put("mode", taskScreenMode) }
+                    }
                 }
 
                 if (sensitiveTask && toolName == "secure_keypad_input") {
@@ -1188,7 +1292,7 @@ class DefaultAgentService : AgentService {
                         try {
                             ToolRegistry.getInstance()
                                 .getTool("get_screen_info")
-                                ?.execute(mapOf("mode" to "compact"))
+                                ?.execute(mapOf("mode" to taskScreenMode))
                                 ?.takeIf { it.isSuccess }
                                 ?.data
                         } catch (_: Exception) {
@@ -1215,6 +1319,22 @@ class DefaultAgentService : AgentService {
                 directDeviceDataGuard.recordToolAttempt(toolName)
                 emailComposeGuard.recordToolAttempt(toolName)
 
+                // Pre-action baseline for the Opt-3 settle gate (recording path uses
+                // the same two-stage change detection as replay, so anchors are never
+                // captured from a pre-transition page that is momentarily still).
+                val settleBaseline = if (toolName in ACTION_TOOLS && toolName !in SKIP_AUTO_SCREEN_AFTER_ACTION) {
+                    ScreenSettleWaiter.captureBaseline()
+                } else {
+                    ""
+                }
+                val toolStartMs = System.currentTimeMillis()
+                val nodeLocatorSnapshot = SkillRecorder.captureNodeLocator(params)
+                // Capture coordinate-based target text BEFORE execution: Opt-3 rebuilds
+                // nodeIdMap for the post-action screen, so a post-execution reverse
+                // lookup would resolve (x,y) against the wrong screen's nodes.
+                val preTargetText = if (SkillRecorder.isRecordingActive()) {
+                    SkillRecorder.captureTargetText(toolName, params, nodeLocatorSnapshot)
+                } else null
                 val result = if (
                     toolName == "get_screen_info" &&
                     !screenChangedSincePrewarm &&
@@ -1225,6 +1345,7 @@ class DefaultAgentService : AgentService {
                 } else {
                     ToolRegistry.getInstance().executeTool(toolName, params)
                 }
+                val toolElapsedMs = System.currentTimeMillis() - toolStartMs
                 val paramsString = if (params.isEmpty()) "" else params.toString()
                 callback.onToolResult(iterations, toolName, displayName, paramsString, result)
                 if (result.isSuccess) {
@@ -1233,6 +1354,8 @@ class DefaultAgentService : AgentService {
                 }
                 if (toolName in ACTION_TOOLS) {
                     screenChangedSincePrewarm = true
+                    actionAttemptCount++
+                    if (result.isSuccess) actionSuccessCount++
                 }
                 if (toolName == "analyze_screen_visual") {
                     vlmAttempted = true
@@ -1268,7 +1391,7 @@ class DefaultAgentService : AgentService {
                                     "Task stopped: failed to analyze the uploaded image. ${userImageResult.error ?: "Unknown error"}"
                                 }
                                 XLog.i(TAG, "User image analysis terminal: $reason")
-                                callback.onComplete(iterations, reason, totalTokens, actualModelName)
+                                callback.onComplete(iterations, reason, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.IMAGE_ANALYSIS)
                                 return
                             }
 
@@ -1292,7 +1415,12 @@ class DefaultAgentService : AgentService {
 
                 sensitiveAmountTerminalMessage(toolName, result, rawUserRequest)?.let { terminal ->
                     XLog.i(TAG, "Sensitive amount terminal after $toolName: ${terminal.take(180)}")
-                    callback.onComplete(iterations, terminal, totalTokens, actualModelName)
+                    val amountDone = terminal.startsWith("Task completed")
+                    callback.onComplete(
+                        iterations, terminal, totalTokens, actualModelName,
+                        if (amountDone) TaskStatus.SUCCESS else TaskStatus.STOPPED,
+                        if (amountDone) TaskReasonCode.TASK_SUCCESS else TaskReasonCode.SENSITIVE_POLICY
+                    )
                     return
                 }
 
@@ -1300,12 +1428,12 @@ class DefaultAgentService : AgentService {
                 if (toolName == "get_screen_info" && result.isSuccess && result.data != null) {
                     SensitiveAppPolicy.missingCredentialTerminalMessage(result.data, rawUserRequest)?.let { terminal ->
                         XLog.i(TAG, "Sensitive missing-credential terminal from get_screen_info")
-                        callback.onComplete(iterations, terminal, totalTokens, actualModelName)
+                        callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
                         return
                     }
                     SensitiveAppPolicy.loginTimeoutTerminalMessage(result.data, rawUserRequest, securePinAttempts, sensitiveDeepLinkAttempts)?.let { terminal ->
                         XLog.i(TAG, "Sensitive login-timeout terminal from get_screen_info")
-                        callback.onComplete(iterations, terminal, totalTokens, actualModelName)
+                        callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
                         return
                     }
                     SensitiveAppPolicy.loginTimeoutRecoveryNotice(result.data, rawUserRequest, securePinAttempts, sensitiveDeepLinkAttempts)?.let { notice ->
@@ -1314,7 +1442,7 @@ class DefaultAgentService : AgentService {
                     }
                     SensitiveAppPolicy.repeatedPinTerminalMessage(result.data, rawUserRequest, securePinAttempts)?.let { terminal ->
                         XLog.i(TAG, "Sensitive repeated-PIN terminal from get_screen_info")
-                        callback.onComplete(iterations, terminal, totalTokens, actualModelName)
+                        callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
                         return
                     }
                     if (runSensitiveBankBatchIfReady(result.data, "get_screen_info")) {
@@ -1335,7 +1463,9 @@ class DefaultAgentService : AgentService {
                                     "Task stopped: adb UI tree is unusable for the current screen. " +
                                             "The app may hide its UI from uiautomator dump, or the current window is not exposing nodes.",
                                     totalTokens,
-                                    actualModelName
+                                    actualModelName,
+                                    TaskStatus.STOPPED,
+                                    TaskReasonCode.UNUSABLE_SCREEN
                                 )
                                 return
                             }
@@ -1364,10 +1494,38 @@ class DefaultAgentService : AgentService {
                     return
                 }
 
-                // finish tool → task complete
+                // finish tool → classify the terminal outcome from the LLM-declared status, then apply
+                // the lightweight system evidence check on success claims.
                 if (toolName == "finish" && result.isSuccess) {
                     val finishData = result.data
-                    callback.onComplete(iterations, finishData ?: ClawApplication.instance.getString(R.string.agent_task_completed), totalTokens, actualModelName)
+                        ?: ClawApplication.instance.getString(R.string.agent_task_completed)
+                    when (params["status"]?.toString()?.trim()?.lowercase()) {
+                        FinishStatus.NOT_A_TASK -> callback.onComplete(
+                            iterations, finishData, totalTokens, actualModelName,
+                            TaskStatus.SUCCESS, TaskReasonCode.CHAT_ONLY
+                        )
+                        FinishStatus.FAILED -> callback.onComplete(
+                            iterations, finishData, totalTokens, actualModelName,
+                            TaskStatus.FAILED, TaskReasonCode.OTHER
+                        )
+                        else -> {
+                            // status="success" (or an omitted/garbled value): trust the claim only if the
+                            // device-action evidence does not outright contradict it. A task that attempted
+                            // device actions but landed zero successes is downgraded to FAILED/UNVERIFIED.
+                            if (actionAttemptCount > 0 && actionSuccessCount == 0) {
+                                XLog.w(TAG, "finish(success) downgraded to FAILED/UNVERIFIED: $actionAttemptCount action attempts, 0 succeeded")
+                                callback.onComplete(
+                                    iterations, finishData, totalTokens, actualModelName,
+                                    TaskStatus.FAILED, TaskReasonCode.UNVERIFIED
+                                )
+                            } else {
+                                callback.onComplete(
+                                    iterations, finishData, totalTokens, actualModelName,
+                                    TaskStatus.SUCCESS, TaskReasonCode.TASK_SUCCESS
+                                )
+                            }
+                        }
+                    }
                     return
                 }
 
@@ -1376,18 +1534,19 @@ class DefaultAgentService : AgentService {
                 // immediately without spending an extra 5 s inference round on get_screen_info.
                 val combinedResultData: String = if (toolName in ACTION_TOOLS && toolName !in SKIP_AUTO_SCREEN_AFTER_ACTION) {
                     try {
-                        Thread.sleep(SCREEN_SETTLE_MS) // let UI animate/settle
+                        //Thread.sleep(SCREEN_SETTLE_MS) // let UI animate/settle
+                        ScreenSettleWaiter.waitForScreenSettle(toolName, baselineFingerprint = settleBaseline)
                         val screenTool = ToolRegistry.getInstance().getTool("get_screen_info")
-                        val screenAfter = screenTool?.execute(mapOf("mode" to "compact"))
+                        val screenAfter = screenTool?.execute(mapOf("mode" to taskScreenMode))
                         if (screenAfter != null && screenAfter.isSuccess && !screenAfter.data.isNullOrBlank()) {
                             SensitiveAppPolicy.missingCredentialTerminalMessage(screenAfter.data, rawUserRequest)?.let { terminal ->
                                 XLog.i(TAG, "Sensitive missing-credential terminal after $toolName")
-                                callback.onComplete(iterations, terminal, totalTokens, actualModelName)
+                                callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
                                 return
                             }
                             SensitiveAppPolicy.loginTimeoutTerminalMessage(screenAfter.data, rawUserRequest, securePinAttempts, sensitiveDeepLinkAttempts)?.let { terminal ->
                                 XLog.i(TAG, "Sensitive login-timeout terminal after $toolName")
-                                callback.onComplete(iterations, terminal, totalTokens, actualModelName)
+                                callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
                                 return
                             }
                             SensitiveAppPolicy.loginTimeoutRecoveryNotice(screenAfter.data, rawUserRequest, securePinAttempts, sensitiveDeepLinkAttempts)?.let { notice ->
@@ -1396,7 +1555,7 @@ class DefaultAgentService : AgentService {
                             }
                             SensitiveAppPolicy.repeatedPinTerminalMessage(screenAfter.data, rawUserRequest, securePinAttempts)?.let { terminal ->
                                 XLog.i(TAG, "Sensitive repeated-PIN terminal after $toolName")
-                                callback.onComplete(iterations, terminal, totalTokens, actualModelName)
+                                callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
                                 return
                             }
                             if (runSensitiveBankBatchIfReady(screenAfter.data, "screen_after_$toolName")) {
@@ -1417,7 +1576,9 @@ class DefaultAgentService : AgentService {
                                             "Task stopped: adb UI tree is unusable for the current screen. " +
                                                     "The app may hide its UI from uiautomator dump, and screenshot/OCR tools are disabled for this task.",
                                             totalTokens,
-                                            actualModelName
+                                            actualModelName,
+                                            TaskStatus.STOPPED,
+                                            TaskReasonCode.UNUSABLE_SCREEN
                                         )
                                         return
                                     }
@@ -1483,6 +1644,57 @@ class DefaultAgentService : AgentService {
                     if (loopHistory.size > LOOP_DETECT_WINDOW) loopHistory.removeFirst()
                 }
 
+                // === Skill Recording: record successful tool step ===
+                try {
+                    if (result.isSuccess) {
+                        var pkgAfter = ""
+                        var actAfter = ""
+                        try {
+                            pkgAfter = LocalAdbDeviceDriver.foregroundPackageName()
+                            actAfter = LocalAdbDeviceDriver.activeActivityName()
+                        } catch (_: Exception) {}
+                        // Anchors MUST be extracted from the same rendering used at replay
+                        // time. ReplayVerifier.verifyAnchorTexts() re-renders with mode="text"
+                        // and substring-matches, so record-side anchors also come from a fixed
+                        // text-mode render. This keeps record/replay symmetric regardless of the
+                        // agent-loop mode (compact for LOCAL, actionable/full for cloud) and keeps
+                        // skill templates provider-neutral. It is a ScreenTreeCache hit right after
+                        // the post-action dump, so it adds no extra uiautomator dump.
+                        val anchorSource = if (SkillRecorder.isRecordingActive()) {
+                            val textRender = try {
+                                LocalAdbDeviceDriver.getScreenTree("text")
+                            } catch (_: Exception) {
+                                null
+                            }
+                            textRender ?: if (toolName in ACTION_TOOLS) {
+                                try {
+                                    val parsed = GSON.fromJson(combinedResultData, ToolResult::class.java)
+                                    parsed?.data ?: result.data
+                                } catch (_: Exception) { result.data }
+                            } else {
+                                result.data
+                            }
+                        } else {
+                            null
+                        }
+                        val anchorTexts = extractAnchorTexts(anchorSource)
+                        SkillRecorder.recordStep(
+                            toolName = toolName,
+                            displayName = displayName,
+                            params = params,
+                            elapsedMs = toolElapsedMs,
+                            expectedPackageAfter = pkgAfter,
+                            expectedActivityAfter = actAfter,
+                            anchorTexts = anchorTexts,
+                            nodeLocator = nodeLocatorSnapshot,
+                            intent = stepIntent,
+                            precomputedTargetText = preTargetText
+                        )
+                    }
+                } catch (e: Exception) {
+                    XLog.w(TAG, "Skill recording step failed", e)
+                }
+
                 // Add tool result to messages
                 messages.add(ToolExecutionResultMessage.from(toolRequest, combinedResultData))
                 if (postToolNotice != null) {
@@ -1509,9 +1721,11 @@ class DefaultAgentService : AgentService {
                         callback.onComplete(
                             iterations,
                             "Task stopped: agent was stuck (${detection.signal.description}). " +
-                            "Used ${status.formattedTokens} tokens (${status.formattedCost}).",
+                                    "Used ${status.formattedTokens} tokens (${status.formattedCost}).",
                             totalTokens,
-                            actualModelName
+                            actualModelName,
+                            TaskStatus.STOPPED,
+                            TaskReasonCode.STUCK
                         )
                         return
                     }
@@ -1531,10 +1745,27 @@ class DefaultAgentService : AgentService {
         }
 
         if (cancelled.get()) {
-            callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName)
+            callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
         } else {
-            callback.onError(iterations, RuntimeException(ClawApplication.instance.getString(R.string.agent_max_iterations, maxIterations)), totalTokens)
+            callback.onComplete(
+                iterations,
+                ClawApplication.instance.getString(R.string.agent_max_iterations, maxIterations),
+                totalTokens,
+                actualModelName,
+                TaskStatus.STOPPED,
+                TaskReasonCode.MAX_ITERATIONS
+            )
         }
+    }
+
+    private fun extractAnchorTexts(screenData: String?): List<String> {
+        if (screenData.isNullOrBlank()) return emptyList()
+        return ANCHOR_QUOTED_LABEL_REGEX.findAll(screenData)
+            .map { it.groupValues[1].trim().removeSuffix("..").trim() }
+            .filter { it.length >= 2 && !it.startsWith("SCREEN_TREE_UNUSABLE") }
+            .distinct()
+            .take(3)
+            .toList()
     }
 
     override fun cancel() {

@@ -74,6 +74,10 @@ class AppViewModel : ViewModel() {
         taskOrchestrator.provideUserImage(imagePath)
     }
 
+    fun resolveReplayConfirm(confirmed: Boolean) {
+        taskOrchestrator.resolveReplayConfirm(confirmed)
+    }
+
     fun init() {
         initCommon()
         initAgent()

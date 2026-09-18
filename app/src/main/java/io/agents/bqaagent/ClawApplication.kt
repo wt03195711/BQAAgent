@@ -19,6 +19,7 @@ import androidx.core.os.LocaleListCompat
  */
 
 val appViewModel: AppViewModel by lazy { ClawApplication.appViewModelInstance }
+
 class ClawApplication : BaseApp() {
 
     companion object {
@@ -41,9 +42,14 @@ class ClawApplication : BaseApp() {
         LocalBackendHealth.recoverPendingGpuCrashIfNeeded()
         ToolRegistry.getInstance().registerAllTools(ToolRegistry.DeviceType.MOBILE)
         io.agents.bqaagent.agent.skill.SkillRegistry.loadBuiltInSkills()
-        io.agents.bqaagent.agent.PlaybookManager.loadAll(this)
+        io.agents.bqaagent.agent.skill.SkillStore.init()
         FallbackRegistry.getInstance().loadAll(this)
-        XLog.e(TAG, "ClawApplication initialized, tools registered: ${ToolRegistry.getInstance().getAllTools().size}")
+        XLog.e(
+            TAG,
+            "ClawApplication initialized, tools registered: ${
+                ToolRegistry.getInstance().getAllTools().size
+            }"
+        )
 
         // Write network logs to file (set to true when debugging)
         DefaultAgentService.FILE_LOGGING_ENABLED = BuildConfig.DEBUG
@@ -54,8 +60,16 @@ class ClawApplication : BaseApp() {
         Thread({
             try {
                 android.util.Log.e("BQAAGENT_INIT", "app-async-init thread STARTED")
+                // Repairs recordings orphaned by a killed process and applies retention.
+                // Posts to the recorder's own scheduler and returns immediately.
+                io.agents.bqaagent.recording.TaskRecordingCoordinator.reconcileAsync()
                 val hasConfig = KVUtils.hasLlmConfig()
-                android.util.Log.e("BQAAGENT_INIT", "app-async-init: hasLlmConfig=$hasConfig, canDrawOverlays=${android.provider.Settings.canDrawOverlays(instance)}")
+                android.util.Log.e(
+                    "BQAAGENT_INIT",
+                    "app-async-init: hasLlmConfig=$hasConfig, canDrawOverlays=${
+                        android.provider.Settings.canDrawOverlays(instance)
+                    }"
+                )
                 if (hasConfig) {
                     appViewModelInstance.initAgent()
                     appViewModelInstance.afterInit()

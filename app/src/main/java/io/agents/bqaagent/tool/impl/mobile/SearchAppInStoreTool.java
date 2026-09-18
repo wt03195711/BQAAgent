@@ -57,6 +57,11 @@ public class SearchAppInStoreTool extends BaseTool {
     }
 
     @Override
+    public List<String> getValueParamNames() {
+        return Collections.singletonList("keyword");
+    }
+
+    @Override
     public String getDisplayName() {
         return ClawApplication.Companion.getInstance().getString(R.string.tool_name_search_app);
     }
