@@ -1,5 +1,5 @@
 # BQAAgent
-BQAAgent 是运行在 Android 设备上、**面向 HSBC 移动端应用打造的 AI 智能自动化测试执行引擎**。依托大语言模型（LLM）驱动，能够理解自然语言测试指令，自主操控手机完成 HSBC App 各类业务流程测试；支持消息自动监控、多步骤业务自动化、视觉兜底识别，同时兼容云端模型与本地端侧模型双模式运行，为移动端金融应用提供一体化智能测试解决方案。
+BQAAgent 是运行在 Android 设备上、**面向 HSBC 移动端应用打造的 AI 智能自动化测试执行引擎**。依托大语言模型（LLM）驱动，能够理解自然语言测试指令，自主操控手机完成 HSBC App 各类业务流程测试；支持消息自动监控、批量任务执行、多步骤业务自动化、视觉兜底识别，同时兼容云端模型与本地端侧模型双模式运行，为移动端金融应用提供一体化智能测试解决方案。
 
 ## 📋 目录
 - [✨ 项目特性](#-项目特性)
@@ -156,6 +156,24 @@ Agent在测试执行中可随时读写、检索测试数据、业务规则信息
 
 ## 🚀 版本更新说明
 ### v0.0.2 新增功能
+#### 📋 批量任务模式
+与对话模式并列的专属执行模式，用于一次性排队并无人值守地连续执行多个测试任务：
+- **独立工作区**：顶栏可在对话 / 批量之间切换；左侧抽屉管理批量会话（新建 / 重命名 / 删除，长按触发），与对话侧栏一致；一个批次 = 一条持久化会话（mode=BATCH），复用三层存储架构
+- **编辑即跑队列**：单批次最多添加 30 个任务，支持文本、语音、截图 OCR、从 Skill 库选取四种入队方式；每行实时显示状态并可点击进入单独任务详情，删除任务前二次确认防止误删
+- **内联批量设置**：自动保存技能、优先回放技能、任务间严格重置（强杀已操作应用 + 回到桌面）、任务间隔空闲时长、失败即停开关
+- **即时(JIT)派发**：每个任务在执行时才解析技能并读取开关状态（按当下配置而非入队时），通过 `TaskOrchestrator` / `BatchTaskDriver` 复用单任务管线
+- **无人值守健壮性**：每个任务前 ADB 活性探测（连接断开则跳过该任务）、12 分钟卡死看门狗（HANG_TIMEOUT / ABANDONED 并保留现场）、WakeLock 保活、任务间干净释放会话锁
+- **续跑与管控**：开始 / 继续（仅重跑未完成任务）/ 取消，取消时带可观察的「停止中…」锁；执行为内联模式，行状态原地更新
+- **非阻塞弹窗**：批内截图上传（FLAG_SECURE）与敏感操作确认以全局弹窗展示并绑定当前任务，30 秒超时仅判该任务失败，绝不阻塞后续任务队列
+
+#### 📸 拍照 / 图片识别任务（OCR）
+把纸质用例或 PC 测试管理平台界面一键转为可执行任务，对话模式与批量模式均可使用：
+- **两种图片来源**：点击相机按钮拍摄 PC 测试管理界面 / 纸质用例，或从相册选择已有图片（`OcrSourceChooserSheet`）
+- **VLM 文本抽取（`TaskOcrExtractor`）**：专用 OCR 提示词仅提取用例 / 步骤内容，严格保留原始编号格式与全部具体取值（名称、数字、金额、URL），保持源语言，同时过滤浏览器外壳、系统 UI 与页面导航等无关文字
+- **可编辑预览**：识别结果回填到输入框供用户校对 / 修改后再添加任务，绝不自动提交
+- **健壮校验**：图片大小上限、沙箱上传目录 + 旧图自动清理（`OcrImageHelper`）、VLM 配置检查，并针对模糊 / 不可读 / 无有效用例图片给出分类错误提示
+- **阻塞式进度遮罩**：识别期间全屏「识别中」遮罩（`OcrLoadingOverlay`）防止重复提交
+
 #### 🎬 Skill 录制 / 保存 / 回放
 基于真实任务执行轨迹的可复用技能系统，把「一次成功的自动化流程」沉淀为可反复回放的模板：
 - **录制（SkillRecorder）**：Agent Loop 执行过程中自动记录每个可回放工具步骤（点击、输入、滑动、打开应用、发送消息等），同步快照节点定位信息（nodeLocator）、目标文本、锚点文本、期望包名 / Activity 与步骤意图
@@ -175,8 +193,8 @@ Agent在测试执行中可随时读写、检索测试数据、业务规则信息
 
 #### ✅ 任务结果状态四分类
 统一、可信的任务终态模型，明确区分「判定权归属」：
-- **SUCCESS / FAILED**：由 LLM 通过 `finish(status=...)` 判定；SUCCESS 额外经过轻量系统证据校验（无成功设备操作的非闲聊任务会被降级为 FAILED / UNVERIFIED）
-- **STOPPED**：由系统代码判定（Token / 迭代上限、死循环、系统弹窗、屏幕不可用、敏感策略、图像分析终止等）
+- **SUCCESS / FAILED**：由 LLM 通过 `finish(status=...)` 判定；SUCCESS 额外经过轻量系统证据校验（无成功设备操作的非闲聊任务会被降级为 FAILED / UNVERIFIED）；敏感操作被用户拒绝或 30 秒确认超时也直接判 FAILED
+- **STOPPED**：由系统代码判定（Token / 迭代上限、死循环、系统弹窗、屏幕不可用、图像分析终止等）
 - **CANCELLED**：由用户主动取消
 - 后端携带 `TaskReasonCode` 细分原因码用于诊断，前端仅展示四类终态
 
@@ -212,19 +230,18 @@ Agent在测试执行中可随时读写、检索测试数据、业务规则信息
 - 长按录音，松开自动识别输入测试指令
 - 支持 arm64-v8a / armeabi-v7a / x86 / x86_64
 
-#### 🔒 敏感模式（Sensitive Mode）
-面向HSBC等银行应用设计的运行时防护策略：
-- 触发条件：开启敏感模式 + 当前前台App匹配敏感应用名单
-- 工具限制：禁用截图、文件发送等存在信息泄露风险的能力
-- PIN/密码需外部传入，遇到凭证输入界面无参数时立即停止任务
-- PIN使用专用安全键盘工具；PIN连续输入两次失败则自动终止流程
-- 转账专用工具，默认在审核页面暂停，需要策略授权才可执行确认操作
-- 识别验证错误、页面锁定时立即终止任务，输出测试日志
+#### 🔒 敏感确认模式（Sensitive Confirm Mode）
+针对支付、密码、转账等高风险操作的用户在场保护机制：
+- 触发条件：设置中开启敏感模式（默认关闭）；对话模式与批量模式全链路覆盖
+- AI 判定：系统提示词规则驱动模型在高风险动作前调用 `request_sensitive_confirm` 闸门工具，阻断待执行操作并返回 BQAAgent 界面弹窗，用户确认后才继续执行
+- 系统硬兜底：`secure_keypad_input`、`input_amount` 无论模型是否判定，一律强制弹窗确认
+- 30 秒确认时限：点击取消或超时未确认自动终止任务，结果标记为失败并给出原因；批量模式下不阻塞后续任务队列
+- 每个高风险步骤单独确认，无「本任务内不再询问」；技能录制保留敏感步骤标记，回放时逐步重新确认
 
 ---
 
 ## 🏗️ 技术架构
-```mermaid
+```
 flowchart TD
     A["测试指令输入"] --> B["PipelineRouter"]
     B -->|"Tier 1"| C["TaskParser 正则解析"]
@@ -250,7 +267,7 @@ flowchart TD
 ├── Tier 1: TaskParser.parse() → DirectIntent / DirectTool（0 LLM，< 1秒）
 ├── Tier 1.5: SkillRegistry.findByTrigger() → SkillExecutor（0 LLM，< 1秒）
 └── Tier 3: DefaultAgentService（Agent Loop，3~30次LLM调用）
-    ├── 构建系统提示词 + SensitivePolicy + DirectDeviceDataGuard
+    ├── 构建系统提示词 + 敏感确认闸门 + DirectDeviceDataGuard
     ├── LLM调用 → 工具执行 → 附带屏幕快照 → 进入下一轮循环
     ├── StuckDetector 死循环监控
     ├── TaskBudget Token/费用限额管控
@@ -275,8 +292,8 @@ flowchart TD
 | | scroll_to_find | 滚动页面查找目标文本 |
 | | find_and_tap | 查找并点击目标元素 |
 | **输入操作** | input_text | 普通文本输入 |
-| | input_amount | 金额专用输入（敏感模式） |
-| | secure_keypad_input | 安全键盘输入PIN（敏感模式） |
+| | input_amount | 金额专用输入（敏感模式硬兜底确认） |
+| | secure_keypad_input | 安全键盘输入PIN（敏感模式硬兜底确认） |
 | | system_key | 系统按键：返回/Home/回车 |
 | | clipboard | 剪贴板读写 |
 | **App管理** | open_app | 打开应用（支持包名/应用名称） |
@@ -288,7 +305,6 @@ flowchart TD
 | | make_call | 拨打电话 |
 | | auto_reply | 开启/关闭消息自动监控 |
 | | send_file | 文件发送 |
-| **银行专用** | bank_own_account_transfer | 账户转账操作（敏感模式） |
 | **高级控制** | repeat_actions | 循环执行动作序列 |
 | | wait | 延时等待 |
 | **知识库** | kb_write / kb_read / kb_search / kb_append / kb_add_todo | 持久化知识库操作 |
@@ -328,7 +344,7 @@ flowchart TD
 - Gradle 8.x（由Gradle Wrapper自动管理）
 
 ### 编译命令
-```bash
+```
 # Debug 调试包
 ./gradlew assembleDebug
 
@@ -382,9 +398,12 @@ app/src/main/
 │   │       ├── mobile/       # 手机专属工具
 │   │       └── tv/           # TV机顶盒遥控工具
 │   ├── ui/                   # 用户界面
+│   │   ├── batch/            # 批量任务模式：队列、配置、驱动与界面
 │   │   ├── chat/             # Compose测试指令会话页面
-│   │   ├── settings/         # LLM/VLM/权限/主题设置
+│   │   ├── common/           # 通用UI组件
 │   │   ├── guide/            # 新手引导
+│   │   ├── recording/        # 录屏播放界面
+│   │   ├── settings/         # LLM/VLM/权限/主题设置
 │   │   ├── splash/           # 启动页
 │   │   └── web/              # Web视图
 │   ├── utils/                # 通用工具类
@@ -414,4 +433,3 @@ You may obtain a copy of the License at
     http://www.apache.org/licenses/LICENSE-2.0
 
 BQAAgent — AI Intelligent Test Execution Engine built for HSBC Mobile Application, developed by agents.io.
-```

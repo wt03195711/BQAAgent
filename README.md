@@ -1,5 +1,5 @@
 # BQAAgent
-BQAAgent is an AI-powered automated test execution engine built for HSBC mobile applications. Driven by Large Language Models (LLMs), it understands natural language test instructions and autonomously operates mobile devices to execute end-to-end business tests on HSBC mobile apps. It supports notification monitoring, multi-step business automation, visual fallback recognition, and works with both cloud-hosted and local on-device LLMs, delivering an all-in-one intelligent testing solution for financial mobile applications.
+BQAAgent is an AI-powered automated test execution engine built for HSBC mobile applications. Driven by Large Language Models (LLMs), it understands natural language test instructions and autonomously operates mobile devices to execute end-to-end business tests on HSBC mobile apps. It supports notification monitoring, batch task execution, multi-step business automation, visual fallback recognition, and works with both cloud-hosted and local on-device LLMs, delivering an all-in-one intelligent testing solution for financial mobile applications.
 
 ## Table of Contents
 - [Key Features](#key-features)
@@ -156,6 +156,24 @@ Other Basic Capabilities
 
 ## Release Notes
 ### v0.0.2 New Features
+#### 📋 Batch Task Mode
+A dedicated execution mode alongside chat for queuing and running many test tasks unattended:
+- **Dedicated workspace**: switch between Chat and Batch from the top bar; a left drawer manages batch sessions (new / rename / delete via long-press) mirroring the chat sidebar; one batch = one persisted conversation (mode=BATCH) reusing the three-layer storage
+- **Edit-and-run queue**: add up to 30 tasks per batch as text, voice, screenshot OCR, or picked from the Skill library; each row shows live status with a tap-through per-task detail transcript, and deletion asks for confirmation to avoid stray drops
+- **Inline batch settings**: auto-save skill, prefer skill replay, strict reset between tasks (force-stop touched apps + back to home), inter-task idle gap, stop-on-failure toggle
+- **Just-in-time dispatch**: each task resolves skills and reads switches at run time under the current config (not add-time), reusing the single-task pipeline via `TaskOrchestrator` / `BatchTaskDriver`
+- **Unattended robustness**: ADB liveness probe before each task (a dropped connection skips the task), a 12-minute hang watchdog (HANG_TIMEOUT / ABANDONED with the scene preserved), wake-lock keep-alive, and clean session-lock release between tasks
+- **Resume & control**: Start / Continue (re-run only unfinished tasks) / Cancel with an observable "Stopping…" lock; execution is inline so row statuses update in place
+- **Non-blocking prompts**: in-batch screenshot upload (FLAG_SECURE) and sensitive-action confirmation appear as global dialogs bound to the current task; the 30s timeout fails only that task and never blocks the rest of the queue
+
+#### 📸 Photo / Image Task Recognition (OCR)
+Turn a paper test case or a PC test-management screen into a runnable task in one shot, available in both chat and batch:
+- **Two capture sources**: tap the camera button to shoot a PC test-management screen / paper case, or pick an existing image from the gallery (`OcrSourceChooserSheet`)
+- **VLM text extraction (`TaskOcrExtractor`)**: a dedicated OCR prompt extracts only the test-case / step content, preserving the original numbered format and every specific value (names, numbers, amounts, URLs), keeping the source language, while filtering out browser chrome, system UI and page navigation
+- **Editable preview**: recognized text is dropped back into the input field for review and edits before the task is added — never auto-submitted
+- **Robust validation**: image size cap, sandboxed upload directory with automatic old-image cleanup (`OcrImageHelper`), a VLM-configured check, and typed errors for blurry / unreadable images or images containing no recognizable task
+- **Blocking progress overlay**: a full-screen "recognizing" indicator (`OcrLoadingOverlay`) prevents duplicate submissions while extraction runs
+
 #### 🎬 Skill Record / Save / Replay
 A reusable skill system built on real task execution traces, distilling "one successful automation flow" into a repeatedly replayable template:
 - **Recording (SkillRecorder)**: during the Agent Loop every replayable tool step is captured automatically (tap, input, swipe, open app, send message, etc.), together with a node locator snapshot (nodeLocator), target text, anchor texts, expected package / activity and step intent
@@ -175,8 +193,8 @@ Task-scoped screen recording that fully preserves the automation process for rev
 
 #### ✅ Four-Way Task Result Classification
 A unified, trustworthy terminal-state model that makes the judging authority explicit:
-- **SUCCESS / FAILED**: decided by the LLM via `finish(status=...)`; SUCCESS additionally passes a lightweight system evidence check (a non-chat task claiming success with zero successful device actions is downgraded to FAILED / UNVERIFIED)
-- **STOPPED**: decided by system code (token / iteration limits, stuck detector, system dialog, unusable screen, sensitive policy, image-analysis termination, etc.)
+- **SUCCESS / FAILED**: decided by the LLM via `finish(status=...)`; SUCCESS additionally passes a lightweight system evidence check (a non-chat task claiming success with zero successful device actions is downgraded to FAILED / UNVERIFIED); FAILED also covers sensitive-action rejection or 30s confirmation timeout
+- **STOPPED**: decided by system code (token / iteration limits, stuck detector, system dialog, unusable screen, image-analysis termination, etc.)
 - **CANCELLED**: decided by the user
 - A backend `TaskReasonCode` carries fine-grained reasons for diagnostics, while the UI shows only the four terminal states
 
@@ -212,19 +230,18 @@ Built on sherpa-onnx offline speech recognition:
 - Long press to record; release to trigger recognition of test instructions
 - Supported ABIs: arm64-v8a / armeabi-v7a / x86 / x86_64
 
-#### 🔒 Sensitive Mode
-Runtime protection policy designed for banking applications including HSBC:
-- Trigger condition: Sensitive Mode enabled + foreground app matches sensitive application list
-- Tool restrictions: Disable screenshot and file transfer to prevent information leakage
-- PIN / password must be passed externally; task pauses immediately if credential input screen has no available parameters
-- Dedicated secure keyboard tool for PIN entry; terminate flow after 2 consecutive PIN failures
-- Dedicated transfer tool, pause at review page by default; explicit policy authorization required to confirm transaction
-- Terminate task immediately and output test logs upon verification errors or page lockout
+#### 🔒 Sensitive Confirm Mode
+User-in-the-loop protection for high-risk operations (payments, passwords, transfers):
+- Trigger condition: Sensitive Mode enabled in Settings (off by default); applies to both chat and batch task pipelines
+- AI judgment: system-prompt rules make the model call the `request_sensitive_confirm` gate before any high-risk action; execution is blocked until the user confirms in the BQAAgent UI
+- System hard gate: `secure_keypad_input` and `input_amount` always require confirmation even if the model misjudges
+- 30-second confirmation window: clicking Cancel or letting it time out terminates the task as FAILED with the rejection reason; the whole task queue in batch mode is never blocked
+- Every high-risk step is confirmed individually; recorded skills keep sensitive-step markers so replays re-ask per step
 
 ---
 
 ## Architecture Overview
-```mermaid
+```
 flowchart TD
     A["Test Instruction Input"] --> B["PipelineRouter"]
     B -->|"Tier 1"| C["TaskParser Rule Parsing"]
@@ -250,7 +267,7 @@ Test Instruction → PipelineRouter.route()
 ├── Tier 1: TaskParser.parse() → DirectIntent / DirectTool (0 LLM, < 1s)
 ├── Tier 1.5: SkillRegistry.findByTrigger() → SkillExecutor (0 LLM, < 1s)
 └── Tier 3: DefaultAgentService (Agent Loop, 3~30 LLM calls)
-    ├── Build system prompt + SensitivePolicy + DirectDeviceDataGuard
+    ├── Build system prompt + SensitiveConfirmGate + DirectDeviceDataGuard
     ├── LLM Invocation → Tool Execution → Capture Snapshot → Next Iteration
     ├── StuckDetector deadlock monitoring
     ├── TaskBudget token & cost limitation control
@@ -275,8 +292,8 @@ Test Instruction → PipelineRouter.route()
 | | scroll_to_find | Scroll page to locate target text |
 | | find_and_tap | Locate and click target element |
 | **Text Input** | input_text | Normal text input |
-| | input_amount | Amount input (Sensitive Mode) |
-| | secure_keypad_input | Secure PIN keyboard input (Sensitive Mode) |
+| | input_amount | Amount input (hard-gated confirm in Sensitive Mode) |
+| | secure_keypad_input | Secure PIN keyboard input (hard-gated confirm in Sensitive Mode) |
 | | system_key | System keys: Back / Home / Enter |
 | | clipboard | Read & write clipboard |
 | **App Management** | open_app | Launch application (package name / app name) |
@@ -288,7 +305,6 @@ Test Instruction → PipelineRouter.route()
 | | make_call | Initiate phone call |
 | | auto_reply | Enable / disable notification auto-monitor |
 | | send_file | File transmission |
-| **Banking Specific** | bank_own_account_transfer | Intra-account transfer (Sensitive Mode) |
 | **Advanced Control** | repeat_actions | Loop action sequence |
 | | wait | Delay sleep |
 | **Knowledge Base** | kb_write / kb_read / kb_search / kb_append / kb_add_todo | Persistent knowledge operations |
@@ -382,9 +398,12 @@ app/src/main/
 │   │       ├── mobile/       # Mobile-only tools
 │   │       └── tv/           # TV STB remote control tools
 │   ├── ui/                   # Application UI
+│   │   ├── batch/            # Batch task mode: queue, config, driver & screens
 │   │   ├── chat/             # Compose test instruction session page
-│   │   ├── settings/         # LLM/VLM/Permission/Theme settings
+│   │   ├── common/           # Shared UI components
 │   │   ├── guide/            # New user guide
+│   │   ├── recording/        # Recording playback UI
+│   │   ├── settings/         # LLM/VLM/Permission/Theme settings
 │   │   ├── splash/           # Launch screen
 │   │   └── web/              # WebView
 │   ├── utils/                # Common utilities
@@ -414,4 +433,3 @@ You may obtain a copy of the License at
     http://www.apache.org/licenses/LICENSE-2.0
 
 BQAAgent — AI Intelligent Test Execution Engine built for HSBC Mobile Application, developed by agents.io.
-```
