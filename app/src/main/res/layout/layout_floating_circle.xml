@@ -2,214 +2,117 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/floatRoot"
-    android:layout_width="56dp"
-    android:layout_height="56dp">
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
 
-    <!-- 任务通知状态（胶囊展开，短暂显示后自动收回） -->
-    <androidx.cardview.widget.CardView
-        android:id="@+id/cardTaskNotify"
-        android:layout_width="wrap_content"
-        android:layout_height="match_parent"
-        app:cardCornerRadius="4dp"
-        app:cardElevation="4dp"
-        app:cardBackgroundColor="@color/colorBrandPrimary"
-        android:visibility="gone">
-
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="match_parent"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingStart="16dp"
-            android:paddingEnd="18dp">
-
-            <ImageView
-                android:id="@+id/ivNotifyChannelLogo"
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:contentDescription="@string/cd_channel_logo"
-                android:src="@drawable/ic_launcher"
-                android:scaleType="centerCrop" />
-
-            <TextView
-                android:id="@+id/tvTaskNotify"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text=""
-                android:textColor="@color/colorBrandOnPrimary"
-                android:textSize="12dp"
-                android:maxWidth="200dp"
-                android:maxLines="2"
-                android:ellipsize="end" />
-
-        </LinearLayout>
-
-    </androidx.cardview.widget.CardView>
-
-    <!-- 等待任务状态（默认） -->
-    <androidx.cardview.widget.CardView
+    <!-- 待命：圆形展示，仅系统 Logo（直径与运行态胶囊厚度一致 = 56dp） -->
+    <com.google.android.material.card.MaterialCardView
         android:id="@+id/cardIdle"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        app:cardCornerRadius="4dp"
-        app:cardElevation="4dp"
-        app:cardBackgroundColor="@color/colorBrandPrimary">
-
-        <TextView
-            android:id="@+id/tvFloatTextIdle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:text="@string/floating_ai_label"
-            android:textColor="@color/colorBrandOnPrimary"
-            android:textSize="16dp"
-            android:textStyle="bold" />
-
-    </androidx.cardview.widget.CardView>
-
-    <!-- 任务执行中状态 (pill shape with token info + stop hint) -->
-    <androidx.cardview.widget.CardView
-        android:id="@+id/cardRunning"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        app:cardCornerRadius="4dp"
-        app:cardElevation="4dp"
-        app:cardBackgroundColor="@color/colorBrandPrimary"
+        app:cardCornerRadius="28dp"
+        app:cardElevation="0dp"
+        app:cardBackgroundColor="@color/float_bg"
+        app:strokeColor="@color/float_border"
+        app:strokeWidth="2dp">
+
+        <FrameLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+
+            <ImageView
+                android:id="@+id/ivIdleLogo"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_gravity="center"
+                android:contentDescription="@null"
+                android:scaleType="fitCenter"
+                android:src="@drawable/bqa_agent_icon" />
+
+        </FrameLayout>
+
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- 运行：胶囊（与圆形同厚度 56dp，横向拉长）；停止按钮最左，Step 固定，意图自适应 -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardActive"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        app:cardCornerRadius="28dp"
+        app:cardElevation="0dp"
+        app:cardBackgroundColor="@color/float_bg"
+        app:strokeColor="@color/float_border"
+        app:strokeWidth="2dp"
         android:visibility="gone">
 
         <LinearLayout
+            android:id="@+id/activeContainer"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:gravity="center_horizontal"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:paddingTop="8dp"
-            android:paddingBottom="6dp"
-            android:minWidth="56dp">
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="8dp"
+            android:paddingEnd="16dp"
+            android:paddingTop="12dp"
+            android:paddingBottom="12dp">
 
+            <!-- 独立停止按钮：图标展示；左侧吸附时在最左，右侧吸附时随容器镜像到最右 -->
+            <ImageView
+                android:id="@+id/btnStop"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_marginEnd="10dp"
+                android:background="@drawable/bg_float_stop"
+                android:clickable="true"
+                android:focusable="true"
+                android:contentDescription="@string/chat_stop"
+                android:padding="8dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_stop"
+                app:tint="@color/float_stop_text" />
+
+            <!-- 文字块：内部强制 LTR，保证 Step N · 意图 顺序与 scrollX 揭示末尾逻辑不受容器镜像影响 -->
             <LinearLayout
+                android:id="@+id/activeTextContainer"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:gravity="center_vertical">
+                android:gravity="center_vertical"
+                android:layoutDirection="ltr"
+                android:textDirection="ltr">
 
-                <!-- Progress spinner (small) -->
-                <ProgressBar
-                    android:id="@+id/progressRunning"
-                    android:layout_width="14dp"
-                    android:layout_height="14dp"
-                    android:indeterminate="true"
-                    android:indeterminateTint="@color/colorBrandOnPrimary"
-                    style="@style/Widget.AppCompat.ProgressBar" />
-
-                <!-- Step | Tokens | Cost -->
+                <!-- Step N：固定展示，不参与滚动 -->
                 <TextView
-                    android:id="@+id/tvTokenStatus"
+                    android:id="@+id/tvStep"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="6dp"
-                    android:text="Step 1"
-                    android:textColor="@color/colorBrandOnPrimary"
-                    android:textSize="11dp"
-                    android:textStyle="bold"
+                    android:layout_marginEnd="6dp"
                     android:maxLines="1"
-                    android:singleLine="true" />
+                    android:singleLine="true"
+                    android:text="Step 1"
+                    android:textColor="@color/float_text"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <!-- 意图信息：宽度随内容自适应，最多 160dp；超过才用 scrollX 滑动展示，且不使用省略号 -->
+                <TextView
+                    android:id="@+id/tvIntent"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:maxWidth="160dp"
+                    android:singleLine="true"
+                    android:scrollHorizontally="true"
+                    android:textColor="@color/float_text"
+                    android:textSize="13sp" />
 
             </LinearLayout>
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="Tap to stop"
-                android:textColor="@color/colorBrandOnPrimary"
-                android:alpha="0.6"
-                android:textSize="8dp" />
-
         </LinearLayout>
 
-    </androidx.cardview.widget.CardView>
-
-    <!-- 任务完成状态 -->
-    <androidx.cardview.widget.CardView
-        android:id="@+id/cardSuccess"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        app:cardCornerRadius="4dp"
-        app:cardElevation="4dp"
-        app:cardBackgroundColor="@color/colorContainerInverse"
-        android:visibility="gone">
-
-        <ImageView
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_gravity="center"
-            android:contentDescription="@string/cd_task_success"
-            android:src="@drawable/ic_check"
-            app:tint="@color/colorBgPrimary" />
-
-    </androidx.cardview.widget.CardView>
-
-    <!-- 任务失败状态 -->
-    <androidx.cardview.widget.CardView
-        android:id="@+id/cardError"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        app:cardCornerRadius="4dp"
-        app:cardElevation="4dp"
-        app:cardBackgroundColor="@color/colorErrorPrimary"
-        android:visibility="gone">
-
-        <ImageView
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_gravity="center"
-            android:contentDescription="@string/cd_task_error"
-            android:src="@drawable/ic_close"
-            app:tint="@color/colorErrorOnPrimary" />
-
-    </androidx.cardview.widget.CardView>
-
-    <!-- 任务停止状态（系统规则/权限中止） -->
-    <androidx.cardview.widget.CardView
-        android:id="@+id/cardStopped"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        app:cardCornerRadius="4dp"
-        app:cardElevation="4dp"
-        app:cardBackgroundColor="@color/colorWarningPrimary"
-        android:visibility="gone">
-
-        <ImageView
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_gravity="center"
-            android:contentDescription="@string/cd_task_stopped"
-            android:src="@drawable/ic_stop"
-            app:tint="@color/colorWarningOnPrimary" />
-
-    </androidx.cardview.widget.CardView>
-
-    <!-- 任务取消状态（用户主动取消） -->
-    <androidx.cardview.widget.CardView
-        android:id="@+id/cardCancelled"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        app:cardCornerRadius="4dp"
-        app:cardElevation="4dp"
-        app:cardBackgroundColor="@color/colorCancelledPrimary"
-        android:visibility="gone">
-
-        <ImageView
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_gravity="center"
-            android:contentDescription="@string/cd_task_cancelled"
-            android:src="@drawable/ic_close"
-            app:tint="@color/colorCancelledOnPrimary" />
-
-    </androidx.cardview.widget.CardView>
+    </com.google.android.material.card.MaterialCardView>
 
 </FrameLayout>

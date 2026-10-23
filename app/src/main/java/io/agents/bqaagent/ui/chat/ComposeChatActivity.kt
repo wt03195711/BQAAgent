@@ -4,7 +4,9 @@
 package io.agents.bqaagent.ui.chat
 
 import io.agents.bqaagent.AppCapabilityCoordinator
+import io.agents.bqaagent.AppRequirement
 import io.agents.bqaagent.ServiceBindingState
+import io.agents.bqaagent.R
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -34,7 +36,17 @@ import java.util.Locale
 import java.util.concurrent.Executors
 
 import android.Manifest
+import android.app.KeyguardManager
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
+import io.agents.bqaagent.agent.TaskOcrExtractor
+import io.agents.bqaagent.agent.OcrExtractionError
+import io.agents.bqaagent.agent.VlmConfigRepository
+import io.agents.bqaagent.utils.OcrImageHelper
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * BQAAgent Chat Activity — Compose shell for the chat screen.
@@ -51,87 +63,140 @@ class ComposeChatActivity : ComponentActivity() {
         private const val AUTOMATION_DUPLICATE_WINDOW_MS = 1_250L
     }
 
-    // 麦克风权限申请
+    private var keyguardLock: KeyguardManager.KeyguardLock? = null
+
+    // Microphone permission reques
     private val recordAudioLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            Toast.makeText(this, "麦克风权限已授予，再次点击麦克风即可语音输入", Toast.LENGTH_SHORT)
+            Toast.makeText(this, getString(R.string.chat_voice_perm_granted), Toast.LENGTH_SHORT)
                 .show()
         } else {
-            Toast.makeText(this, "麦克风权限被拒绝，无法使用语音输入", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.chat_voice_perm_denied), Toast.LENGTH_SHORT).show()
         }
     }
 
-    // Image picker for user-assisted screenshot fallback
-    private val userImagePickerLauncher = registerForActivityResult(
+    // Camera permission request for OCR
+    private val cameraPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            launchOcrCamera()
+        } else {
+            Toast.makeText(this, getString(R.string.ocr_camera_perm_denied), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Camera launcher for OCR — takes a photo and saves to ocr_uploads
+    private var ocrCameraFile: java.io.File? = null
+    private val ocrCameraLauncher = registerForActivityResult(
+        ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success && ocrCameraFile != null && ocrCameraFile!!.exists()) {
+            processOcrImage(android.net.Uri.fromFile(ocrCameraFile))
+        } else {
+            _ocrLoading.value = false
+            ocrCameraFile?.delete()
+            ocrCameraFile = null
+        }
+    }
+
+    // Gallery picker for OCR
+    private val ocrGalleryLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
         if (uri == null) {
-            appViewModel.provideUserImage(null)
+            _ocrLoading.value = false
             return@registerForActivityResult
         }
-        var destFile: java.io.File? = null
-        try {
-            val mimeType = contentResolver.getType(uri)
-            if (mimeType == null || !mimeType.startsWith("image/")) {
-                Toast.makeText(
-                    this,
-                    "⚠️ Please select an image file (PNG, JPEG, WebP).",
-                    Toast.LENGTH_LONG
-                ).show()
-                appViewModel.provideUserImage(null)
-                return@registerForActivityResult
-            }
+        processOcrImage(uri)
+    }
 
-            val fileSize = contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
-            val maxSize = 20L * 1024 * 1024
-            if (fileSize > maxSize) {
-                val sizeMb = fileSize / (1024 * 1024)
-                Toast.makeText(
-                    this,
-                    "⚠️ Image too large (${sizeMb}MB). Maximum is 20MB.",
-                    Toast.LENGTH_LONG
-                ).show()
-                appViewModel.provideUserImage(null)
-                return@registerForActivityResult
-            }
-            if (fileSize < 10L * 1024) {
-                Toast.makeText(
-                    this,
-                    "⚠️ Image too small. Please upload a full-screen screenshot.",
-                    Toast.LENGTH_LONG
-                ).show()
-                appViewModel.provideUserImage(null)
-                return@registerForActivityResult
-            }
+    // OCR state
+    private val _ocrLoading = mutableStateOf(false)
+    private val _ocrExtractedText = mutableStateOf<String?>(null)
+    private val _showOcrSheet = mutableStateOf(false)
+    private val _showMonitorGuide = mutableStateOf(false)
+    private val activityScope = CoroutineScope(Dispatchers.Main)
 
-            val uploadDir = getExternalFilesDir("user_uploads") ?: run {
-                appViewModel.provideUserImage(null)
-                return@registerForActivityResult
-            }
-            if (!uploadDir.exists()) uploadDir.mkdirs()
-            val extension = when {
-                mimeType.contains("jpeg") || mimeType.contains("jpg") -> "jpg"
-                mimeType.contains("webp") -> "webp"
-                mimeType.contains("png") -> "png"
-                else -> "png"
-            }
-            destFile =
-                java.io.File(uploadDir, "screenshot_${System.currentTimeMillis()}.$extension")
-            contentResolver.openInputStream(uri)?.use { input ->
-                destFile!!.outputStream().use { output -> input.copyTo(output) }
-            }
-            XLog.i(
-                TAG,
-                "User image saved to ${destFile!!.absolutePath} (${fileSize / 1024}KB, $mimeType)"
-            )
-            appViewModel.provideUserImage(destFile!!.absolutePath)
-        } catch (e: Exception) {
-            XLog.e(TAG, "Failed to save user image", e)
-            destFile?.delete()
-            appViewModel.provideUserImage(null)
+    // Notification permission requested from the monitor permission guide. The sheet itself
+    // polls capabilities every 800ms, so a grant is picked up without extra wiring here.
+    private val monitorNotifPermLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        XLog.i(TAG, "monitor guide notification permission result: granted=$granted")
+    }
+
+    private fun launchOcrCamera() {
+        val ocrDir = getExternalFilesDir("ocr_uploads")
+        if (ocrDir == null) {
+            Toast.makeText(this, getString(R.string.ocr_storage_unavailable), Toast.LENGTH_SHORT).show()
+            _ocrLoading.value = false
+            return
         }
+        try {
+            if (!ocrDir.exists()) ocrDir.mkdirs()
+            val file = java.io.File(ocrDir, "ocr_cam_${System.currentTimeMillis()}.jpg")
+            ocrCameraFile = file
+            val uri = FileProvider.getUriForFile(
+                this,
+                "${packageName}.fileprovider",
+                file
+            )
+            ocrCameraLauncher.launch(uri)
+        } catch (e: Exception) {
+            XLog.e(TAG, "launchOcrCamera failed", e)
+            Toast.makeText(this, getString(R.string.ocr_camera_failed), Toast.LENGTH_SHORT).show()
+            _ocrLoading.value = false
+        }
+    }
+
+    private fun processOcrImage(uri: android.net.Uri) {
+        _ocrLoading.value = true
+        activityScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                OcrImageHelper.prepareImage(uri, this@ComposeChatActivity)
+            }
+            val path = result.getOrNull()
+            if (path == null) {
+                Toast.makeText(this@ComposeChatActivity, getString(R.string.ocr_image_error), Toast.LENGTH_SHORT).show()
+                _ocrLoading.value = false
+                return@launch
+            }
+
+            val config = VlmConfigRepository.load()
+            if (!config.isConfigured) {
+                Toast.makeText(this@ComposeChatActivity, getString(R.string.ocr_vlm_not_configured), Toast.LENGTH_LONG).show()
+                _ocrLoading.value = false
+                return@launch
+            }
+
+            val extractionResult = TaskOcrExtractor.extractTaskFromImage(path, config)
+            _ocrLoading.value = false
+            extractionResult.fold(
+                onSuccess = { extracted ->
+                    _ocrExtractedText.value = extracted
+                    withContext(Dispatchers.IO) {
+                        OcrImageHelper.cleanupOldImages(this@ComposeChatActivity)
+                    }
+                },
+                onFailure = { error ->
+                    val msgRes = (error as? OcrExtractionError)?.userMessageRes ?: R.string.ocr_image_error
+                    Toast.makeText(this@ComposeChatActivity, getString(msgRes), Toast.LENGTH_SHORT).show()
+                },
+            )
+        }
+    }
+
+    // Image picker for user-assisted screenshot fallback. Validation/save/toast logic is shared with
+    // the batch mode via UserImageUploadHelper so both behave identically; null == skip.
+    private val userImagePickerLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        appViewModel.provideUserImage(
+            io.agents.bqaagent.utils.UserImageUploadHelper.savePickedImage(this, uri)
+        )
     }
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -143,7 +208,7 @@ class ComposeChatActivity : ComponentActivity() {
     private val _isLocalModelActive = mutableStateOf(ModelConfigRepository.isLocalActive())
     private val _usesExplicitInputModes =
         mutableStateOf(ModelConfigRepository.activeModelUsesExplicitInputModes())
-    private val _needsPermission = mutableStateOf(false)
+    private val _permissionBannerText = mutableStateOf<String?>(null)
     private val _isAwaitingReply = mutableStateOf(false)
     private val _isTaskRunning = mutableStateOf(false)
     private val _inputEnabled =
@@ -206,12 +271,22 @@ class ComposeChatActivity : ComponentActivity() {
         ActiveTaskShellController(appViewModel = appViewModel)
     }
 
+    /**
+     * Non-blocking capability banner text, or null to hide. Only definitive down states surface:
+     * CONNECTING is a transient probe (15s cache staleness right after resume) and READY needs
+     * no banner — mirroring the SettingsActivity updateTaskRecordingLabel lesson.
+     */
+    private fun computePermissionBannerText(): String? = when (AppCapabilityCoordinator.localAdbState(this)) {
+        ServiceBindingState.DEGRADED -> getString(R.string.chat_banner_adb_disconnected)
+        ServiceBindingState.DISABLED -> getString(R.string.chat_banner_adb_not_ready)
+        else -> null
+    }
+
     // Permission polling
     private val permHandler = Handler(Looper.getMainLooper())
     private val permPoller = object : Runnable {
         override fun run() {
-            _needsPermission.value =
-                AppCapabilityCoordinator.localAdbState(this@ComposeChatActivity) != ServiceBindingState.READY
+            _permissionBannerText.value = computePermissionBannerText()
             permHandler.postDelayed(this, 1000)
         }
     }
@@ -219,17 +294,6 @@ class ComposeChatActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
-
-        // Hide floating circle only when no task is running
-        // (task running = keep floating pill visible for step/token status)
-        try {
-            if (!appViewModel.isTaskRunning()) {
-                FloatingCircleManager.hide()
-            } else {
-                XLog.d(TAG, "onCreate: task running, keeping floating circle visible")
-            }
-        } catch (_: Exception) {
-        }
 
         // Check for updates
         io.agents.bqaagent.utils.UpdateChecker.checkForUpdate(this)
@@ -249,7 +313,7 @@ class ComposeChatActivity : ComponentActivity() {
                 ChatScreen(
                     messages = _messages.toList(),
                     modelStatus = _modelStatus.value,
-                    needsPermission = _needsPermission.value,
+                    permissionBannerText = _permissionBannerText.value,
                     isAwaitingReply = _isAwaitingReply.value,
                     isTaskRunning = _isTaskRunning.value,
                     inputEnabled = _inputEnabled.value,
@@ -283,6 +347,9 @@ class ComposeChatActivity : ComponentActivity() {
                             )
                         )
                     },
+                    onOpenBatch = {
+                        io.agents.bqaagent.ui.batch.BatchActivity.start(this@ComposeChatActivity)
+                    },
                     onFixPermissions = {
                         startActivity(
                             Intent(
@@ -294,7 +361,7 @@ class ComposeChatActivity : ComponentActivity() {
                     onAttach = {
                         Toast.makeText(
                             this@ComposeChatActivity,
-                            "Image upload coming soon",
+                            getString(R.string.chat_image_upload_soon),
                             Toast.LENGTH_SHORT
                         ).show()
                     },
@@ -337,13 +404,20 @@ class ComposeChatActivity : ComponentActivity() {
                     onModelSwitch = { modelId, displayName -> switchModel(modelId, displayName) },
                     colors = composeColors,
                     voiceEnabled = _voiceEnabled.value,
-                    // 新增语音权限申请回调
+                    // Voice permission request callback
                     onRequestRecordPermission = {
                         recordAudioLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     },
                     showUserImageUpload = taskFlowController.showUserImageUpload,
                     onUploadImage = { userImagePickerLauncher.launch("image/*") },
                     onSkipImageUpload = { appViewModel.provideUserImage(null) },
+                    sensitiveConfirmPrompt = taskFlowController.sensitiveConfirmPrompt,
+                    onApproveSensitive = { appViewModel.resolveSensitiveConfirm(true) },
+                    onDenySensitive = { appViewModel.resolveSensitiveConfirm(false) },
+                    onOcrRequest = { _showOcrSheet.value = true },
+                    ocrLoading = _ocrLoading.value,
+                    ocrExtractedText = _ocrExtractedText.value,
+                    onOcrConsumed = { _ocrExtractedText.value = null },
                     skillSaveState = skillSaveOverlayState,
                     onOpenSkillSaveDetail = { taskFlowController.showSkillSaveDetail() },
                     onDismissSkillSave = { taskFlowController.dismissSkillSave() },
@@ -356,6 +430,61 @@ class ComposeChatActivity : ComponentActivity() {
                         )
                     },
                 )
+
+                if (_showOcrSheet.value) {
+                    io.agents.bqaagent.ui.common.OcrSourceChooserSheet(
+                        colors = composeColors,
+                        onCamera = {
+                            _showOcrSheet.value = false
+                            if (androidx.core.content.ContextCompat.checkSelfPermission(
+                                    this@ComposeChatActivity, Manifest.permission.CAMERA
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                            ) {
+                                launchOcrCamera()
+                            } else {
+                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                            }
+                        },
+                        onGallery = {
+                            _showOcrSheet.value = false
+                            ocrGalleryLauncher.launch("image/*")
+                        },
+                        onDismiss = { _showOcrSheet.value = false },
+                    )
+                }
+
+                if (_showMonitorGuide.value) {
+                    io.agents.bqaagent.ui.common.MonitorPermissionSheet(
+                        colors = composeColors,
+                        targetLabel = taskFlowController.pendingMonitorTarget?.displayLabel.orEmpty(),
+                        onRequestNotificationPermission = {
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                                monitorNotifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                        },
+                        onOpenRequirement = { requirement ->
+                            if (requirement == AppRequirement.NOTIFICATION_ACCESS) {
+                                // Return to chat (not Settings) after the listener connects.
+                                KVUtils.markPendingNotificationAccessReturnToChat()
+                            }
+                            AppCapabilityCoordinator.openSystemSettings(this@ComposeChatActivity, requirement)
+                        },
+                        onStart = {
+                            _showMonitorGuide.value = false
+                            if (!taskFlowController.resumePendingMonitorIfReady()) {
+                                taskFlowController.clearPendingMonitor()
+                            }
+                        },
+                        onDismiss = {
+                            _showMonitorGuide.value = false
+                            taskFlowController.clearPendingMonitor()
+                        },
+                    )
+                }
+
+                if (_ocrLoading.value) {
+                    io.agents.bqaagent.ui.common.OcrLoadingOverlay(colors = composeColors)
+                }
 
                 SkillSaveOverlay(
                     state = if (skillSaveOverlayState is SkillSaveOverlayState.OfferSave) {
@@ -420,12 +549,21 @@ class ComposeChatActivity : ComponentActivity() {
         handleIntentAutomation(intent, initialDelayMs = 0)
     }
 
+    /** Opens the non-blocking monitor permission guide (see MonitorPermissionSheet). */
+    fun showMonitorPermissionGuide() {
+        _showMonitorGuide.value = true
+    }
+
     override fun onResume() {
         super.onResume()
         // Recording tail-off waits for this flag so the return-to-chat moment is captured.
         TaskRecordingCoordinator.onChatResumed()
-        _needsPermission.value =
-            AppCapabilityCoordinator.localAdbState(this) != ServiceBindingState.READY
+        _permissionBannerText.value = computePermissionBannerText()
+        // Breakpoint resume: returning from system settings with everything granted starts
+        // the parked monitor immediately; otherwise the open sheet keeps polling.
+        if (taskFlowController.resumePendingMonitorIfReady()) {
+            _showMonitorGuide.value = false
+        }
         refreshModelModeState()
         _isTaskRunning.value = appViewModel.isTaskRunning()
         _voiceEnabled.value = KVUtils.isVoiceInputEnabled()
@@ -440,6 +578,8 @@ class ComposeChatActivity : ComponentActivity() {
                 visibleMessages = _messages.toList(),
             )
         }
+        // Authoritative "last mode" marker for cold-start restore; the top-most resumed screen wins.
+        KVUtils.setLastUiMode(io.agents.bqaagent.ui.batch.BatchUiMode.CHAT)
     }
 
     override fun onPause() {
@@ -453,6 +593,7 @@ class ComposeChatActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        disableKeepAlive()
         chatSessionController.onDestroy()
         executor.shutdown()
     }
@@ -697,6 +838,27 @@ class ComposeChatActivity : ComponentActivity() {
             }
         } else {
             config.activeCloud.modelName
+        }
+    }
+
+    internal fun enableKeepAlive() {
+        runOnUiThread {
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (keyguardLock == null) {
+                val km = getSystemService(android.content.Context.KEYGUARD_SERVICE) as KeyguardManager
+                keyguardLock = km.newKeyguardLock(TAG)
+            }
+            keyguardLock?.disableKeyguard()
+            XLog.d(TAG, "Keep-alive enabled (FLAG_KEEP_SCREEN_ON + keyguard disabled)")
+        }
+    }
+
+    internal fun disableKeepAlive() {
+        runOnUiThread {
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            keyguardLock?.reenableKeyguard()
+            keyguardLock = null
+            XLog.d(TAG, "Keep-alive disabled")
         }
     }
 }

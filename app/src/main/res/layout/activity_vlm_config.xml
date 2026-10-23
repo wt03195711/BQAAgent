@@ -91,162 +91,30 @@
                 </LinearLayout>
             </androidx.cardview.widget.CardView>
 
-            <!-- Config Form -->
+            <!-- Saved Configs (NEW) -->
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="20dp"
                 android:paddingHorizontal="4dp"
                 android:paddingBottom="8dp"
-                android:text="Configuration"
+                android:text="Saved Configs"
                 android:textColor="@color/colorTextSecondary"
                 android:textSize="13dp"
                 android:textStyle="bold" />
 
-            <androidx.cardview.widget.CardView
+            <LinearLayout
+                android:id="@+id/layoutSavedVlmProfiles"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="24dp"
-                app:cardBackgroundColor="@color/colorContainerBrighten"
-                app:cardCornerRadius="0dp"
-                app:cardElevation="1dp">
+                android:orientation="vertical" />
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="16dp">
-
-                    <!-- API Key -->
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="API Key"
-                        android:textColor="@color/colorTextSecondary"
-                        android:textSize="12dp"
-                        android:layout_marginBottom="4dp" />
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical">
-
-                        <EditText
-                            android:id="@+id/etVlmApiKey"
-                            android:layout_width="0dp"
-                            android:layout_height="44dp"
-                            android:layout_weight="1"
-                            android:background="@drawable/bg_edit_text"
-                            android:hint="sk-..."
-                            android:inputType="text"
-                            android:paddingHorizontal="12dp"
-                            android:textColor="@color/colorTextPrimary"
-                            android:textColorHint="@color/colorTextTertiary"
-                            android:textSize="13dp" />
-
-                        <TextView
-                            android:id="@+id/btnVlmClearApiKey"
-                            android:layout_width="wrap_content"
-                            android:layout_height="44dp"
-                            android:gravity="center"
-                            android:paddingHorizontal="10dp"
-                            android:text="Clear"
-                            android:textColor="@color/colorErrorPrimary"
-                            android:textSize="12dp" />
-                    </LinearLayout>
-
-                    <!-- Base URL -->
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Base URL"
-                        android:textColor="@color/colorTextSecondary"
-                        android:textSize="12dp"
-                        android:layout_marginTop="12dp"
-                        android:layout_marginBottom="4dp" />
-
-                    <EditText
-                        android:id="@+id/etVlmBaseUrl"
-                        android:layout_width="match_parent"
-                        android:layout_height="44dp"
-                        android:background="@drawable/bg_edit_text"
-                        android:hint="https://api.openai.com/v1"
-                        android:inputType="textUri"
-                        android:paddingHorizontal="12dp"
-                        android:textColor="@color/colorTextPrimary"
-                        android:textColorHint="@color/colorTextTertiary"
-                        android:textSize="13dp" />
-
-                    <!-- Model Name -->
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Model Name"
-                        android:textColor="@color/colorTextSecondary"
-                        android:textSize="12dp"
-                        android:layout_marginTop="12dp"
-                        android:layout_marginBottom="4dp" />
-
-                    <EditText
-                        android:id="@+id/etVlmModelName"
-                        android:layout_width="match_parent"
-                        android:layout_height="44dp"
-                        android:background="@drawable/bg_edit_text"
-                        android:hint="gpt-4o"
-                        android:inputType="text"
-                        android:paddingHorizontal="12dp"
-                        android:textColor="@color/colorTextPrimary"
-                        android:textColorHint="@color/colorTextTertiary"
-                        android:textSize="13dp" />
-
-                    <!-- Connection Status -->
-                    <TextView
-                        android:id="@+id/tvVlmConnectionStatus"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:textSize="12dp"
-                        android:visibility="gone" />
-
-                    <!-- Buttons -->
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="14dp"
-                        android:orientation="horizontal">
-
-                        <TextView
-                            android:id="@+id/btnVlmTestConnection"
-                            android:layout_width="0dp"
-                            android:layout_height="44dp"
-                            android:layout_weight="1"
-                            android:layout_marginEnd="6dp"
-                            android:background="@drawable/bg_button_secondary_square"
-                            android:gravity="center"
-                            android:text="Test"
-                            android:textColor="@color/colorTextSecondary"
-                            android:textSize="13dp" />
-
-                        <io.agents.bqaagent.widget.KButton
-                            android:id="@+id/btnVlmSave"
-                            android:layout_width="0dp"
-                            android:layout_height="44dp"
-                            android:layout_weight="2"
-                            android:text="Save" />
-                    </LinearLayout>
-
-                    <!-- Hint -->
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="Compatible with: OpenAI GPT-4o, Google Gemini, Qwen-VL, any OpenAI-compatible vision endpoint"
-                        android:textColor="@color/colorTextTertiary"
-                        android:textSize="10dp" />
-
-                </LinearLayout>
-            </androidx.cardview.widget.CardView>
+            <io.agents.bqaagent.widget.KButton
+                android:id="@+id/btnAddNewVlmProfile"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginTop="8dp"
+                android:text="+ Add Vision Model" />
 
         </LinearLayout>
     </ScrollView>

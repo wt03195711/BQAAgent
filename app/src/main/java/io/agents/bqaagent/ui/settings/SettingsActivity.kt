@@ -56,6 +56,9 @@ import kotlinx.coroutines.withContext
 class SettingsActivity : BaseActivity() {
     private companion object {
         private const val REQUEST_POST_NOTIFICATIONS = 100
+        private const val SECTION_PERM_ADVANCED = "perm_advanced"
+        private const val SECTION_SKILL_MGMT = "skill_mgmt"
+        private const val SECTION_TASK_RECORDING = "task_recording"
     }
 
     // Poll permissions every second (same as original HomeActivity)
@@ -79,9 +82,11 @@ class SettingsActivity : BaseActivity() {
     private var languageItem: io.agents.bqaagent.widget.MenuItem? = null
     private var voiceInputItem: io.agents.bqaagent.widget.MenuItem? = null
     private var sensitiveModeItem: io.agents.bqaagent.widget.MenuItem? = null
+    private var floatingWindowItem: io.agents.bqaagent.widget.MenuItem? = null
     private var skillCaptureModeItem: io.agents.bqaagent.widget.MenuItem? = null
     private var taskRecordingItem: io.agents.bqaagent.widget.MenuItem? = null
     private var recordingFilesItem: io.agents.bqaagent.widget.MenuItem? = null
+    private var skillDataItem: io.agents.bqaagent.widget.MenuItem? = null
     private var localAdbSetupOpening = false
     private var localAdbSetupDialog: LocalAdbSetupDialog? = null
     private var localAdbRefreshOnResume = false
@@ -135,7 +140,9 @@ class SettingsActivity : BaseActivity() {
         refreshExternalAutomation()
         refreshVoiceInput()
         refreshSensitiveMode()
+        refreshFloatingWindow()
         refreshSkillCaptureMode()
+        refreshSkillDataCount()
         refreshTaskRecording()
         handler.removeCallbacks(permPoller)
         handler.postDelayed(permPoller, 1000)
@@ -161,6 +168,11 @@ class SettingsActivity : BaseActivity() {
         pendingLocalAdbNotificationPermission = false
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             openLocalAdbPairingFlow()
+        } else if (!shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) {
+            // Second denial with "don't ask again" — the system dialog is gone for good;
+            // route to notification settings instead of looping on an invisible request.
+            Toast.makeText(this, R.string.local_adb_pair_notif_perm_blocked, Toast.LENGTH_LONG).show()
+            AppCapabilityCoordinator.openAppNotificationSettings(this)
         } else {
             Toast.makeText(this, R.string.local_adb_notification_permission_required, Toast.LENGTH_LONG).show()
         }
@@ -168,36 +180,136 @@ class SettingsActivity : BaseActivity() {
 
     private fun refreshPermissions() {
         val capabilities = AppCapabilityCoordinator.snapshot(this)
-        permLocalAdb?.setTrailingText(capabilities.localAdbStatusLabel)
-        permNotification?.setTrailingText(capabilities.notificationPermissionStatusLabel)
-        permNotifAccess?.setTrailingText(capabilities.notificationAccessStatusLabel)
-        permOverlay?.setTrailingText(if (capabilities.overlayGranted) "Enabled" else "Disabled")
-        permBattery?.setTrailingText(if (capabilities.batteryOptimizationIgnored) "Unrestricted" else "Restricted")
-        permStorage?.setTrailingText(if (capabilities.storageAccessGranted) "Enabled" else "Disabled")
+        permLocalAdb?.setTrailingText(
+            when (capabilities.localAdbState) {
+                ServiceBindingState.READY -> getString(R.string.perm_status_ready)
+                ServiceBindingState.CONNECTING -> getString(R.string.perm_status_not_ready)
+                ServiceBindingState.DEGRADED -> getString(R.string.perm_status_disconnected)
+                ServiceBindingState.DISABLED -> getString(R.string.perm_status_not_ready)
+            }
+        )
+        permNotification?.setTrailingText(
+            getString(
+                if (capabilities.notificationPermissionGranted) R.string.perm_status_allowed
+                else R.string.perm_status_not_allowed
+            )
+        )
+        permNotifAccess?.setTrailingText(
+            when (capabilities.notificationAccessState) {
+                ServiceBindingState.READY -> getString(R.string.perm_status_connected)
+                ServiceBindingState.CONNECTING -> getString(R.string.perm_status_connecting)
+                ServiceBindingState.DEGRADED -> getString(R.string.perm_status_disconnected)
+                ServiceBindingState.DISABLED -> getString(R.string.perm_status_disabled)
+            }
+        )
+        permOverlay?.setTrailingText(
+            getString(
+                if (capabilities.overlayGranted) R.string.perm_status_allowed
+                else R.string.perm_status_not_allowed
+            )
+        )
+        permBattery?.setTrailingText(
+            getString(
+                if (capabilities.batteryOptimizationIgnored) R.string.perm_status_unrestricted
+                else R.string.perm_status_restricted
+            )
+        )
+        permStorage?.setTrailingText(
+            when {
+                capabilities.storageAccessGranted -> getString(R.string.perm_status_allowed)
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> getString(R.string.perm_status_not_needed)
+                else -> getString(R.string.perm_status_not_allowed)
+            }
+        )
+        updateAdvancedSummary(capabilities)
+    }
+
+    /**
+     * Summary counts only what actually matters today: the notification permission is a hard
+     * prerequisite for ADB pairing; overlay counts as advisory only when the floating-window
+     * feature is ON; battery is advisory. Notification Access is NOT counted (the monitor guide
+     * owns it) and neither is storage (not needed on Android 11+).
+     */
+    private fun updateAdvancedSummary(capabilities: io.agents.bqaagent.AppCapabilitySnapshot) {
+        val requiredMissing = if (!capabilities.notificationPermissionGranted) 1 else 0
+        val floatingNeedsOverlay = KVUtils.isFloatingWindowEnabled() && !capabilities.overlayGranted
+        val advisory =
+            (if (!capabilities.batteryOptimizationIgnored) 1 else 0) +
+                    (if (floatingNeedsOverlay) 1 else 0)
+        // Advanced summary fallback. The Overlay row's default subtitle explains the permission
+        // itself; the dynamic one below cross-links it to the feature that needs it.
+        permOverlay?.setSubtitle(
+            if (floatingNeedsOverlay) getString(R.string.settings_perm_overlay_needed_by_floating)
+            else getString(R.string.settings_perm_overlay_subtitle)
+        )
+        val (text, warning) = when {
+            requiredMissing > 0 -> getString(R.string.settings_perm_summary_to_enable, requiredMissing) to true
+            advisory > 0 -> getString(R.string.settings_perm_summary_recommended, advisory) to false
+            else -> getString(R.string.settings_perm_summary_all_set) to false
+        }
+        findViewById<MenuGroup>(R.id.permissionsGroup).setSectionSummary(SECTION_PERM_ADVANCED, text, warning)
     }
 
     private fun refreshExternalAutomation() {
         externalAutomationItem?.setTrailingText(
-            if (KVUtils.isExternalAutomationEnabled()) "Enabled" else "Disabled"
+            if (KVUtils.isExternalAutomationEnabled()) getString(R.string.settings_state_enabled)
+            else getString(R.string.settings_state_disabled)
         )
     }
 
     private fun refreshVoiceInput() {
         voiceInputItem?.setTrailingText(
-            if (KVUtils.isVoiceInputEnabled()) "Enabled" else "Disabled"
+            if (KVUtils.isVoiceInputEnabled()) getString(R.string.settings_state_enabled)
+            else getString(R.string.settings_state_disabled)
         )
     }
 
     private fun refreshSensitiveMode() {
         sensitiveModeItem?.setTrailingText(
-            if (KVUtils.isSensitiveModeEnabled()) "Enabled" else "Disabled"
+            if (KVUtils.isSensitiveConfirmEnabled()) getString(R.string.settings_state_enabled)
+            else getString(R.string.settings_state_disabled)
+        )
+    }
+
+    private fun refreshFloatingWindow() {
+        val enabled = KVUtils.isFloatingWindowEnabled()
+        // Combo label (mirrors updateTaskRecordingLabel): a stale plain "Enabled" hides the fact
+        // that the pill cannot actually show without the overlay permission.
+        val overlayMissing = !android.provider.Settings.canDrawOverlays(this)
+        val warning = enabled && overlayMissing
+        floatingWindowItem?.setTrailingText(
+            when {
+                !enabled -> getString(R.string.settings_state_disabled)
+                warning -> getString(R.string.settings_floating_window_no_overlay)
+                else -> getString(R.string.settings_state_enabled)
+            }
+        )
+        floatingWindowItem?.setTrailingTextColor(
+            if (warning) getColor(R.color.colorErrorPrimary) else getColor(R.color.colorTextSecondary)
         )
     }
 
     private fun refreshSkillCaptureMode() {
         skillCaptureModeItem?.setTrailingText(
-            if (KVUtils.isSkillCaptureModeEnabled()) "Enabled" else "Disabled"
+            if (KVUtils.isSkillCaptureModeEnabled()) getString(R.string.settings_state_enabled)
+            else getString(R.string.settings_state_disabled)
         )
+    }
+
+    /**
+     * Shows the saved-skill usage on the Skill Data row (current / max) so the cap is visible before
+     * the user dives into Skill Management. Mirrors [refreshTaskRecording]: the skill library is read
+     * off the main thread, and it refreshes on every onResume so save/delete changes are reflected.
+     */
+    private fun refreshSkillDataCount() {
+        lifecycleScope.launch {
+            val summary = withContext(Dispatchers.IO) {
+                val count = io.agents.bqaagent.agent.skill.SkillStore.getAllSkills().size
+                val max = io.agents.bqaagent.agent.skill.SkillStore.MAX_SKILLS
+                getString(R.string.settings_skill_data_count, count, max)
+            }
+            skillDataItem?.setTrailingText(summary)
+        }
     }
 
     /**
@@ -216,10 +328,10 @@ class SettingsActivity : BaseActivity() {
         val abort = TaskRecordingCoordinator.lastAbortReason
         taskRecordingItem?.setTrailingText(
             when {
-                !enabled -> "Disabled"
-                adbDown -> "Enabled · ADB off"
-                !abort.isNullOrBlank() -> "Enabled · issue"
-                else -> "Enabled"
+                !enabled -> getString(R.string.settings_state_disabled)
+                adbDown -> getString(R.string.settings_task_recording_adb_off)
+                !abort.isNullOrBlank() -> getString(R.string.settings_task_recording_issue)
+                else -> getString(R.string.settings_state_enabled)
             }
         )
         taskRecordingItem?.setTrailingTextColor(
@@ -234,7 +346,8 @@ class SettingsActivity : BaseActivity() {
             val summary = withContext(Dispatchers.IO) {
                 val entries = TaskRecordingStore.listRecordings()
                 val bytes = entries.sumOf { TaskRecordingStore.dirSize(it.dir) }
-                "${entries.size} file(s) · ${TaskRecordingStore.formatBytes(bytes)}"
+                getString(R.string.settings_recordings_files_count, entries.size) +
+                        " · " + TaskRecordingStore.formatBytes(bytes)
             }
             recordingFilesItem?.setTrailingText(summary)
         }
@@ -249,24 +362,24 @@ class SettingsActivity : BaseActivity() {
         if (!enabled) {
             KVUtils.setTaskRecordingEnabled(false)
             refreshTaskRecording()
-            Toast.makeText(this, "Task Recording disabled", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, R.string.settings_recording_disabled_toast, Toast.LENGTH_SHORT).show()
             return
         }
         if (!LocalAdbAutomation.hasConnectionConfig()) {
             AlertDialog.show(
                 context = this,
-                title = "Local ADB required",
-                message = "Task recording runs over the same Local ADB channel as automation.\n\nConnect Local ADB first (Permissions → Local ADB), then enable recording.",
-                actionTitle = "Got it"
+                title = getString(R.string.settings_recording_adb_required_title),
+                message = getString(R.string.settings_recording_adb_required_message),
+                actionTitle = getString(R.string.common_got_it)
             )
             return
         }
         if (verifyingRecording || selfTestRunning) {
-            Toast.makeText(this, "Already checking this device", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, R.string.settings_recording_checking_toast, Toast.LENGTH_SHORT).show()
             return
         }
         if (appViewModel.isTaskRunning()) {
-            Toast.makeText(this, "Stop the running task first", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, R.string.settings_recording_stop_task_toast, Toast.LENGTH_LONG).show()
             return
         }
         verifyThenEnableRecording()
@@ -476,16 +589,19 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun hideDeferredSettingsGroups() {
-        // TODO 隐藏暂未开放的设置分组
+        // TODO Hide settings groups that are not yet available
         listOf(R.id.toolsGroup, R.id.remoteGroup, R.id.aboutGroup).forEach { id ->
             findViewById<MenuGroup>(id)?.visibility = android.view.View.GONE
         }
     }
 
     private fun applyThemeToGroups(tc: io.agents.bqaagent.ui.chat.ThemeManager.ChatColors) {
+        // skillManagerGroup / recordingGroup no longer exist as standalone cards (their items
+        // live as collapsible sections inside generalGroup); iterating a group whose first child
+        // is a collapsible header would repaint the header's warning-colored trailing every poll.
         val groups = listOf(
-            R.id.permissionsGroup, R.id.channelGroup, R.id.modelGroup,
-            R.id.appearanceGroup, R.id.skillManagerGroup, R.id.recordingGroup,
+            R.id.permissionsGroup, R.id.generalGroup, R.id.channelGroup, R.id.modelGroup,
+            R.id.appearanceGroup,
             R.id.toolsGroup, R.id.remoteGroup, R.id.aboutGroup
         )
         for (id in groups) {
@@ -495,6 +611,7 @@ class SettingsActivity : BaseActivity() {
             for (i in 0 until g.getMenuItemCount()) {
                 g.getMenuItemAt(i)?.apply {
                     setTitleColor(tc.aiText)
+                    setSubtitleColor(tc.toolDefault)
                     setTrailingTextColor(tc.toolDefault)
                     setLeadingIconColor(tc.aiText)
                     setTrailingIconColor(tc.toolDefault)
@@ -591,7 +708,7 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun toggleSensitiveMode() {
-        if (KVUtils.isSensitiveModeEnabled()) {
+        if (KVUtils.isSensitiveConfirmEnabled()) {
             ConfirmDialog.showWarm(
                 context = this,
                 title = getString(R.string.sensitive_mode_disable_title),
@@ -599,16 +716,46 @@ class SettingsActivity : BaseActivity() {
                 actionTitle = getString(R.string.sensitive_mode_disable_confirm),
                 cancelTitle = getString(R.string.common_cancel),
                 onAction = {
-                    KVUtils.setSensitiveModeEnabled(false)
+                    KVUtils.setSensitiveConfirmEnabled(false)
                     refreshSensitiveMode()
                     Toast.makeText(this, R.string.sensitive_mode_disabled, Toast.LENGTH_SHORT).show()
                 }
             )
         } else {
-            KVUtils.setSensitiveModeEnabled(true)
+            KVUtils.setSensitiveConfirmEnabled(true)
             refreshSensitiveMode()
             Toast.makeText(this, R.string.sensitive_mode_enabled, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun toggleFloatingWindow() {
+        val enabled = !KVUtils.isFloatingWindowEnabled()
+        KVUtils.setFloatingWindowEnabled(enabled)
+        if (enabled) {
+            // Turning on shows the bubble immediately (independent of any running task).
+            if (!android.provider.Settings.canDrawOverlays(this)) {
+                // Never block the switch itself; guide instead. Auto-jump is a proactive prompt,
+                // so it obeys the 24h per-touchpoint anti-spam rule — once suppressed, the combo
+                // label + hint toast carry the message and the Overlay row stays a manual tap away.
+                if (KVUtils.shouldShowGuidePrompt("overlay_toggle")) {
+                    KVUtils.markGuidePromptShown("overlay_toggle")
+                    AppCapabilityCoordinator.openSystemSettings(this, AppRequirement.OVERLAY)
+                } else {
+                    Toast.makeText(this, R.string.settings_floating_window_overlay_hint, Toast.LENGTH_LONG).show()
+                }
+            }
+            io.agents.bqaagent.floating.FloatingCircleManager.show(application)
+        } else {
+            // Turning off immediately hides the window currently on screen.
+            io.agents.bqaagent.floating.FloatingCircleManager.hide()
+        }
+        refreshFloatingWindow()
+        Toast.makeText(
+            this,
+            if (enabled) R.string.settings_floating_window_enabled_toast
+            else R.string.settings_floating_window_disabled_toast,
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     private fun toggleSkillCaptureMode() {
@@ -618,14 +765,14 @@ class SettingsActivity : BaseActivity() {
         if (enabled) {
             AlertDialog.show(
                 context = this,
-                title = "Skill Capture Mode enabled",
-                message = "Tasks now run independently without chat history, and completed tasks can be recorded and saved as reusable skills.\n\nNote: please describe the complete task in one message, since follow-up replies will not continue the previous task.",
-                actionTitle = "Got it"
+                title = getString(R.string.settings_skill_capture_on_title),
+                message = getString(R.string.settings_skill_capture_on_message),
+                actionTitle = getString(R.string.common_got_it)
             )
         } else {
             Toast.makeText(
                 this,
-                "Skill Capture Mode off: tasks follow chat history again, skill saving disabled",
+                R.string.settings_skill_capture_off_toast,
                 Toast.LENGTH_LONG
             ).show()
         }
@@ -633,6 +780,22 @@ class SettingsActivity : BaseActivity() {
 
     private fun showLocalAdbSetupDialog() {
         openSmartLocalAdbEntry()
+    }
+
+    /**
+     * Inline how-to for first-time users: pairing Local ADB over wireless debugging is not obvious
+     * on a phone, so the info button next to the row walks them through the exact steps.
+     */
+    private fun showLocalAdbPairingGuide() {
+        AlertDialog.show(
+            context = this,
+            title = getString(R.string.local_adb_guide_title),
+            message = getString(R.string.local_adb_guide_message),
+            actionTitle = getString(R.string.common_got_it),
+            messageAlignStart = true,
+            messageTextSizeDp = 13f,
+            messageMaxLines = 18,
+        )
     }
 
     private fun openSmartLocalAdbEntry() {
@@ -646,7 +809,7 @@ class SettingsActivity : BaseActivity() {
     private fun reconnectRememberedLocalAdb() {
         if (localAdbSetupOpening) return
         localAdbSetupOpening = true
-        permLocalAdb?.setTrailingText("Not Ready")
+        permLocalAdb?.setTrailingText(getString(R.string.perm_status_not_ready))
         Toast.makeText(this, R.string.local_adb_reconnecting_saved_pair, Toast.LENGTH_SHORT).show()
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -665,6 +828,36 @@ class SettingsActivity : BaseActivity() {
     }
 
     private fun openLocalAdbPairingFlow() {
+        // Step 0: the pairing code is delivered through a notification, so a blocked notification
+        // permission silently kills the flow later. Gate it upfront, with a permanent-denial
+        // escape hatch — never just a dead-end toast.
+        ensureNotificationPermissionForPairing { continueLocalAdbPairingFlow() }
+    }
+
+    private fun ensureNotificationPermissionForPairing(proceed: () -> Unit) {
+        if (AppCapabilityCoordinator.isNotificationPermissionGranted(this)) {
+            proceed()
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            // No runtime notification permission below 13; notification visibility is decided
+            // at channel level and handled by showLocalAdbPairingNotification's failure path.
+            proceed()
+            return
+        }
+        if (KVUtils.isNotifPermAskedBefore() &&
+            !shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            Toast.makeText(this, R.string.local_adb_pair_notif_perm_blocked, Toast.LENGTH_LONG).show()
+            AppCapabilityCoordinator.openAppNotificationSettings(this)
+            return
+        }
+        KVUtils.markNotifPermAsked()
+        pendingLocalAdbNotificationPermission = true
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
+    }
+
+    private fun continueLocalAdbPairingFlow() {
         if (showLocalAdbPairingNotification()) {
             Toast.makeText(this, R.string.local_adb_notification_ready, Toast.LENGTH_LONG).show()
             LocalAdbAutomation.openWirelessDebuggingSettings(this)
@@ -799,20 +992,35 @@ class SettingsActivity : BaseActivity() {
     private fun initMenuGroups() {
         // Permissions
         val permissionsGroup = findViewById<MenuGroup>(R.id.permissionsGroup)
-        permissionsGroup.setTitle("Permissions")
+        permissionsGroup.setTitle(getString(R.string.settings_group_permissions))
 
         permLocalAdb = permissionsGroup.addMenuItem(
             leadingIcon = R.drawable.ic_local_adb,
             title = getString(R.string.home_card_local_adb_title),
+            subtitle = getString(R.string.home_card_local_adb_subtitle),
             onClick = {
                 showLocalAdbSetupDialog()
             },
+            onInfoClick = {
+                showLocalAdbPairingGuide()
+            },
             showDivider = true
         )
+        permLocalAdb?.setInfoButtonContentDescription(getString(R.string.local_adb_guide_content_desc))
+
+        permissionsGroup.beginCollapsibleSection(
+            sectionId = SECTION_PERM_ADVANCED,
+            title = getString(R.string.settings_perm_advanced_title),
+            headerIcon = R.drawable.ic_settings,
+        ) { expanded ->
+            KVUtils.setPermAdvancedExpanded(expanded)
+        }
+        permissionsGroup.setSectionExpanded(SECTION_PERM_ADVANCED, KVUtils.isPermAdvancedExpanded())
 
         permNotification = permissionsGroup.addMenuItem(
             leadingIcon = R.drawable.ic_notification,
             title = getString(R.string.home_card_notification_title),
+            subtitle = getString(R.string.home_card_notification_subtitle),
             onClick = {
                 if (!AppCapabilityCoordinator.isNotificationPermissionGranted(this@SettingsActivity)) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -823,15 +1031,12 @@ class SettingsActivity : BaseActivity() {
                 }
             },
             showDivider = true
-        ).apply {
-            setTrailingText(
-                if (AppCapabilityCoordinator.isNotificationPermissionGranted(this@SettingsActivity)) "Enabled" else "Disabled"
-            )
-        }
+        )
 
         permNotifAccess = permissionsGroup.addMenuItem(
             leadingIcon = R.drawable.ic_notification,
-            title = "Notification Access",
+            title = getString(R.string.settings_perm_notif_access_title),
+            subtitle = getString(R.string.settings_perm_notif_access_subtitle),
             onClick = {
                 AppCapabilityCoordinator.openSystemSettings(this, AppRequirement.NOTIFICATION_ACCESS)
             },
@@ -840,10 +1045,11 @@ class SettingsActivity : BaseActivity() {
 
         permOverlay = permissionsGroup.addMenuItem(
             leadingIcon = R.drawable.ic_window,
-            title = getString(R.string.home_card_system_window_title),
+            title = getString(R.string.settings_perm_overlay_title),
+            subtitle = getString(R.string.settings_perm_overlay_subtitle),
             onClick = {
                 if (AppCapabilityCoordinator.snapshot(this@SettingsActivity).overlayGranted) {
-                    Toast.makeText(this@SettingsActivity, R.string.home_overlay_enabled, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@SettingsActivity, R.string.settings_perm_overlay_already_granted, Toast.LENGTH_SHORT).show()
                 } else {
                     AppCapabilityCoordinator.openSystemSettings(this@SettingsActivity, AppRequirement.OVERLAY)
                 }
@@ -854,6 +1060,7 @@ class SettingsActivity : BaseActivity() {
         permBattery = permissionsGroup.addMenuItem(
             leadingIcon = R.drawable.ic_battery,
             title = getString(R.string.home_card_battery_title),
+            subtitle = getString(R.string.home_card_battery_subtitle),
             onClick = {
                 if (AppCapabilityCoordinator.snapshot(this@SettingsActivity).batteryOptimizationIgnored) {
                     Toast.makeText(this@SettingsActivity, R.string.home_battery_ignored, Toast.LENGTH_SHORT).show()
@@ -867,9 +1074,14 @@ class SettingsActivity : BaseActivity() {
         permStorage = permissionsGroup.addMenuItem(
             leadingIcon = R.drawable.ic_storage,
             title = getString(R.string.home_card_storage_title),
+            subtitle = getString(R.string.home_card_storage_subtitle),
             onClick = {
                 if (AppCapabilityCoordinator.snapshot(this@SettingsActivity).storageAccessGranted) {
                     Toast.makeText(this@SettingsActivity, R.string.home_storage_enabled, Toast.LENGTH_SHORT).show()
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    // On Android 11+ the app never needs this; explain instead of pushing to a
+                    // scary system page (see refreshPermissions: label reads "Not needed").
+                    Toast.makeText(this@SettingsActivity, R.string.perm_status_not_needed, Toast.LENGTH_SHORT).show()
                 } else {
                     AppCapabilityCoordinator.openSystemSettings(this@SettingsActivity, AppRequirement.STORAGE)
                 }
@@ -889,7 +1101,6 @@ class SettingsActivity : BaseActivity() {
         )
         menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
 
-
         val modelGroup = findViewById<MenuGroup>(R.id.modelGroup)
         modelGroup.setTitle(getString(R.string.settings_group_model))
 
@@ -903,11 +1114,131 @@ class SettingsActivity : BaseActivity() {
 
         menuItems[SettingsViewModel.MenuAction.VLM_CONFIG.name] = modelGroup.addMenuItem(
             leadingIcon = R.drawable.icon_current_model,
-            title = "Vision Model",
+            title = getString(R.string.settings_vision_model_title),
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.VLM_CONFIG) },
             showDivider = false
         )
         menuItems[SettingsViewModel.MenuAction.VLM_CONFIG.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+
+        // General
+        val generalGroup = findViewById<MenuGroup>(R.id.generalGroup)
+        generalGroup.setTitle(getString(R.string.settings_group_general))
+
+        sensitiveModeItem = generalGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_lock_lock,
+            title = getString(R.string.sensitive_mode_title),
+            subtitle = getString(R.string.settings_sensitive_mode_subtitle),
+            onClick = { toggleSensitiveMode() },
+            showDivider = true
+        ).apply {
+            setTrailingText(
+                if (KVUtils.isSensitiveConfirmEnabled()) getString(R.string.settings_state_enabled)
+                else getString(R.string.settings_state_disabled)
+            )
+        }
+
+        floatingWindowItem = generalGroup.addMenuItem(
+            leadingIcon = R.drawable.ic_window,
+            title = getString(R.string.settings_floating_window_title),
+            subtitle = getString(R.string.settings_floating_window_subtitle),
+            onClick = { toggleFloatingWindow() },
+            showDivider = true
+        ).apply {
+            setTrailingText(if (KVUtils.isFloatingWindowEnabled()) getString(R.string.settings_state_enabled) else getString(R.string.settings_state_disabled))
+        }
+
+        voiceInputItem = generalGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_btn_speak_now,
+            title = getString(R.string.settings_voice_input_title),
+            onClick = { toggleVoiceInput() },
+            showDivider = true
+        ).apply {
+            setTrailingText(
+                if (KVUtils.isVoiceInputEnabled()) getString(R.string.settings_state_enabled)
+                else getString(R.string.settings_state_disabled)
+            )
+        }
+
+        generalGroup.beginCollapsibleSection(
+            sectionId = SECTION_SKILL_MGMT,
+            title = getString(R.string.settings_group_skill_management),
+            headerIcon = android.R.drawable.ic_menu_agenda,
+        ) { expanded ->
+            KVUtils.setSectionExpanded(SECTION_SKILL_MGMT, expanded)
+        }
+        generalGroup.setSectionExpanded(SECTION_SKILL_MGMT, KVUtils.isSectionExpanded(SECTION_SKILL_MGMT))
+
+        skillCaptureModeItem = generalGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_save,
+            title = getString(R.string.settings_skill_capture_mode_title),
+            onClick = { toggleSkillCaptureMode() },
+            showDivider = true
+        ).apply {
+            setTrailingText(
+                if (KVUtils.isSkillCaptureModeEnabled()) getString(R.string.settings_state_enabled)
+                else getString(R.string.settings_state_disabled)
+            )
+        }
+
+        skillDataItem = generalGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_agenda,
+            title = getString(R.string.settings_skill_data_title),
+            onClick = {
+                startActivity(Intent(this, SkillManagerActivity::class.java))
+            },
+            showDivider = true
+        ).apply {
+            setTrailingText(
+                getString(
+                    R.string.settings_skill_data_count,
+                    io.agents.bqaagent.agent.skill.SkillStore.getAllSkills().size,
+                    io.agents.bqaagent.agent.skill.SkillStore.MAX_SKILLS
+                )
+            )
+        }
+        generalGroup.endCollapsibleSection()
+
+        generalGroup.beginCollapsibleSection(
+            sectionId = SECTION_TASK_RECORDING,
+            title = getString(R.string.settings_task_recording_title),
+            headerIcon = android.R.drawable.ic_menu_manage,
+        ) { expanded ->
+            KVUtils.setSectionExpanded(SECTION_TASK_RECORDING, expanded)
+        }
+        generalGroup.setSectionExpanded(SECTION_TASK_RECORDING, KVUtils.isSectionExpanded(SECTION_TASK_RECORDING))
+
+        taskRecordingItem = generalGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_camera,
+            title = getString(R.string.settings_task_recording_enable_title),
+            onClick = { toggleTaskRecording() },
+            showDivider = true
+        ).apply {
+            setTrailingText(
+                if (KVUtils.isTaskRecordingEnabled()) getString(R.string.settings_state_enabled)
+                else getString(R.string.settings_state_disabled)
+            )
+        }
+
+        recordingFilesItem = generalGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_gallery,
+            title = getString(R.string.settings_recorded_files_title),
+            onClick = {
+                startActivity(
+                    Intent(this, io.agents.bqaagent.ui.recording.RecordingManagerActivity::class.java)
+                )
+            },
+            showDivider = false
+        ).apply {
+            setTrailingText(getString(R.string.settings_recordings_files_count, 0))
+            // Support tool, not a user flow. Everything a user needs is now covered by the
+            // verification gate in toggleTaskRecording(), so the self-test moves behind a
+            // long-press: it stays reachable for diagnostics without asking anyone to run it.
+            setOnLongClickListener {
+                runRecordingSelfTest()
+                true
+            }
+        }
+        generalGroup.endCollapsibleSection()
 
         // Appearance
         val appearanceGroup = findViewById<MenuGroup>(R.id.appearanceGroup)
@@ -930,85 +1261,12 @@ class SettingsActivity : BaseActivity() {
             leadingIcon = R.drawable.ic_language,
             title = getString(R.string.settings_language),
             onClick = { toggleAppLanguage() },
-            showDivider = true
+            showDivider = false
         ).apply {
             setTrailingText(currentLanguageLabel())
         }
 
-        voiceInputItem = appearanceGroup.addMenuItem(
-            leadingIcon = android.R.drawable.ic_btn_speak_now,
-            title = "Voice Input",
-            onClick = { toggleVoiceInput() },
-            showDivider = true
-        ).apply {
-            setTrailingText(if (KVUtils.isVoiceInputEnabled()) "Enabled" else "Disabled")
-        }
-
-        sensitiveModeItem = appearanceGroup.addMenuItem(
-            leadingIcon = android.R.drawable.ic_lock_lock,
-            title = getString(R.string.sensitive_mode_title),
-            onClick = { toggleSensitiveMode() },
-            showDivider = false
-        ).apply {
-            setTrailingText(if (KVUtils.isSensitiveModeEnabled()) "Enabled" else "Disabled")
-        }
-
-        // Skill Management
-        val skillManagerGroup = findViewById<MenuGroup>(R.id.skillManagerGroup)
-        skillManagerGroup.setTitle("Skill Management")
-
-        skillCaptureModeItem = skillManagerGroup.addMenuItem(
-            leadingIcon = android.R.drawable.ic_menu_save,
-            title = "Skill Capture Mode",
-            onClick = { toggleSkillCaptureMode() },
-            showDivider = true
-        ).apply {
-            setTrailingText(if (KVUtils.isSkillCaptureModeEnabled()) "Enabled" else "Disabled")
-        }
-
-        skillManagerGroup.addMenuItem(
-            leadingIcon = android.R.drawable.ic_menu_agenda,
-            title = "Skill Data",
-            onClick = {
-                startActivity(Intent(this, SkillManagerActivity::class.java))
-            },
-            showDivider = false
-        )
-
-        // Task Recording
-        val recordingGroup = findViewById<MenuGroup>(R.id.recordingGroup)
-        recordingGroup.setTitle("Task Recording")
-
-        taskRecordingItem = recordingGroup.addMenuItem(
-            leadingIcon = android.R.drawable.ic_menu_camera,
-            title = "Task Recording",
-            onClick = { toggleTaskRecording() },
-            showDivider = true
-        ).apply {
-            setTrailingText(if (KVUtils.isTaskRecordingEnabled()) "Enabled" else "Disabled")
-        }
-
-        recordingFilesItem = recordingGroup.addMenuItem(
-            leadingIcon = android.R.drawable.ic_menu_gallery,
-            title = "Recorded Files",
-            onClick = {
-                startActivity(
-                    Intent(this, io.agents.bqaagent.ui.recording.RecordingManagerActivity::class.java)
-                )
-            },
-            showDivider = false
-        ).apply {
-            setTrailingText("0 file(s)")
-            // Support tool, not a user flow. Everything a user needs is now covered by the
-            // verification gate in toggleTaskRecording(), so the self-test moves behind a
-            // long-press: it stays reachable for diagnostics without asking anyone to run it.
-            setOnLongClickListener {
-                runRecordingSelfTest()
-                true
-            }
-        }
-
-        // Tools
+        // Tool
         val toolsGroup = findViewById<MenuGroup>(R.id.toolsGroup)
         toolsGroup.setTitle("Tools")
 

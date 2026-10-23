@@ -14,7 +14,8 @@ class SkillReplayer(
     private val skill: SkillDefinition,
     private val template: ExecutionTemplate,
     private val extractedParams: Map<String, String>,
-    private val isSessionActive: () -> Boolean
+    private val isSessionActive: () -> Boolean,
+    private val sensitiveGate: ((summary: String, riskType: String) -> Boolean)? = null
 ) {
 
     private val cancelled = AtomicBoolean(false)
@@ -67,6 +68,27 @@ class SkillReplayer(
             if (elapsed > timeoutMs) {
                 XLog.w(TAG, "Replay timeout at step ${index + 1}")
                 return ReplayResult(false, stepsCompleted, message = "Replay timeout after ${elapsed}ms")
+            }
+
+            if (step.sensitive && sensitiveGate != null) {
+                val riskType = if (step.toolName == "secure_keypad_input") "password" else "payment"
+                val summary = step.confirmSummary.ifBlank { stepLabel(step) }
+                XLog.i(TAG, "Sensitive gate at step ${index + 1}: $summary ($riskType)")
+                val approved = sensitiveGate.invoke(summary, riskType)
+                if (isCancelled()) {
+                    XLog.i(TAG, "Replay cancelled during sensitive confirmation at step ${index + 1}")
+                    return ReplayResult(false, stepsCompleted, message = "Replay cancelled", cancelled = true)
+                }
+                if (!approved) {
+                    XLog.w(TAG, "Sensitive action rejected by user at step ${index + 1}")
+                    onStepResult?.invoke(index + 1, totalSteps, stepLabel(step), false, "Rejected by user (sensitive confirm)", 0L, formatParamsForDisplay(step.params))
+                    return ReplayResult(
+                        success = false,
+                        stepsUsed = stepsCompleted,
+                        message = "Sensitive action rejected at step ${index + 1}: $summary",
+                        rejected = true
+                    )
+                }
             }
 
             onStepProgress?.invoke(index + 1, totalSteps, "${step.displayName}...")

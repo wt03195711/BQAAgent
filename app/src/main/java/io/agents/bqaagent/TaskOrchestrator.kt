@@ -17,6 +17,9 @@ import io.agents.bqaagent.agent.skill.SkillMatchResult
 import io.agents.bqaagent.agent.skill.SkillMatcher
 import io.agents.bqaagent.agent.skill.SkillSaveData
 import io.agents.bqaagent.agent.skill.SkillReplayer
+import io.agents.bqaagent.agent.skill.SkillDefinition
+import io.agents.bqaagent.agent.skill.ExecutionTemplate
+import io.agents.bqaagent.ui.batch.BatchRunContext
 import io.agents.bqaagent.channel.Channel
 import io.agents.bqaagent.channel.ChannelManager
 import io.agents.bqaagent.floating.FloatingCircleManager
@@ -47,8 +50,15 @@ class TaskOrchestrator(
 
     /** Pending replay-confirmation handoff (same pattern as pendingUserImage). */
     private var pendingReplayConfirmLatch: java.util.concurrent.CountDownLatch? = null
+
     @Volatile
     private var pendingReplayConfirmed = false
+
+    /** Pending sensitive-confirmation handoff (same pattern as pendingUserImage). */
+    private var pendingSensitiveConfirmLatch: java.util.concurrent.CountDownLatch? = null
+
+    @Volatile
+    private var pendingSensitiveConfirmApproved = false
 
     companion object {
         private const val TAG = "TaskOrchestrator"
@@ -56,6 +66,7 @@ class TaskOrchestrator(
 
     // User image handoff fields
     private var pendingUserImageLatch: java.util.concurrent.CountDownLatch? = null
+
     @Volatile
     private var pendingUserImagePath: String? = null
 
@@ -85,7 +96,10 @@ class TaskOrchestrator(
             val config = agentConfigProvider()
             if (::agentService.isInitialized) {
                 agentService.updateConfig(config)
-                XLog.d(TAG, "Agent config updated: model=${config.modelName}, temp=${config.temperature}")
+                XLog.d(
+                    TAG,
+                    "Agent config updated: model=${config.modelName}, temp=${config.temperature}"
+                )
                 true
             } else {
                 XLog.w(TAG, "AgentService not initialized, initializing with new config")
@@ -101,11 +115,19 @@ class TaskOrchestrator(
 
     // ==================== Task Lock ====================
 
-    fun tryAcquireTask(messageId: String, channel: Channel, taskText: String = ""): Boolean {
+    fun tryAcquireTask(
+        messageId: String,
+        channel: Channel,
+        taskText: String = "",
+        autoReturnToChat: Boolean = true,
+        isBatch: Boolean = false
+    ): Boolean {
         return taskSessionStore.tryAcquire(
             messageId = messageId,
             channel = channel,
             taskText = taskText,
+            autoReturnToChat = autoReturnToChat,
+            isBatch = isBatch,
         )
     }
 
@@ -127,7 +149,10 @@ class TaskOrchestrator(
         XLog.i(TAG, "autoReturnToChatIfNeeded: returning to BQAAgent chatroom")
         try {
             val context = ClawApplication.instance
-            val intent = android.content.Intent(context, io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java).apply {
+            val intent = android.content.Intent(
+                context,
+                io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java
+            ).apply {
                 flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
                         android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
             }
@@ -150,6 +175,8 @@ class TaskOrchestrator(
         pendingUserImageLatch?.countDown()
         // Release a pending replay confirmation so the pipeline thread doesn't hang
         pendingReplayConfirmLatch?.countDown()
+        // Release a pending sensitive confirmation so the agent/replay thread doesn't hang
+        pendingSensitiveConfirmLatch?.countDown()
         val cancelledSession = releaseTask(RecordingOutcome.CANCELLED)
         taskEventCallback?.invoke(TaskEvent.Cancelled)
         ForegroundService.resetToIdle(ClawApplication.instance)
@@ -181,6 +208,15 @@ class TaskOrchestrator(
     fun resolveReplayConfirm(confirmed: Boolean) {
         pendingReplayConfirmed = confirmed
         pendingReplayConfirmLatch?.countDown()
+    }
+
+    /**
+     * Called by UI when the user approves or denies a sensitive-confirm request
+     * (TaskEvent.SensitiveConfirmRequest).
+     */
+    fun resolveSensitiveConfirm(approved: Boolean) {
+        pendingSensitiveConfirmApproved = approved
+        pendingSensitiveConfirmLatch?.countDown()
     }
 
     /**
@@ -221,6 +257,83 @@ class TaskOrchestrator(
     }
 
     /**
+     * Block the calling worker thread until the user approves/denies the sensitive
+     * action or the timeout elapses. Mirrors onScreenshotBlocked: foregrounds the
+     * screen that hosts this task's UI (batch -> BatchActivity, chat ->
+     * ComposeChatActivity), marks the session as waiting, restores the target app
+     * on EVERY exit path, and reports the decision back through TaskEvents.
+     *
+     * @return true only when the user explicitly approved within the deadline
+     */
+    private fun awaitSensitiveConfirmation(
+        isSessionActive: () -> Boolean,
+        actionSummary: String,
+        riskType: String,
+        timeoutMs: Long
+    ): Boolean {
+        if (!isSessionActive()) return false
+        val isBatch = taskSessionStore.snapshot().isBatch
+
+        val targetPackage = try {
+            LocalAdbDeviceDriver.foregroundPackageName()
+        } catch (e: Exception) {
+            XLog.w(TAG, "awaitSensitiveConfirmation: failed to get foreground package", e)
+            ""
+        }
+        XLog.i(TAG, "awaitSensitiveConfirmation: summary=${actionSummary.take(80)}, risk=$riskType, isBatch=$isBatch")
+
+        taskSessionStore.markWaitingUserImage()
+        // Waiting for the user: the device is idle and BQAAgent is about to be foregrounded.
+        TaskRecordingCoordinator.markDeviceIdle()
+        taskEventCallback?.invoke(TaskEvent.SensitiveConfirmRequest(actionSummary, riskType, timeoutMs))
+
+        // Bring BQAAgent to foreground so the user can see the confirmation dialog.
+        try {
+            val context = ClawApplication.instance
+            val foregroundTarget = if (isBatch) {
+                io.agents.bqaagent.ui.batch.BatchActivity::class.java
+            } else {
+                io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java
+            }
+            val bringIntent = android.content.Intent(context, foregroundTarget).apply {
+                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                        android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            context.startActivity(bringIntent)
+        } catch (e: Exception) {
+            XLog.e(TAG, "awaitSensitiveConfirmation: failed to bring app to foreground", e)
+        }
+
+        val latch = java.util.concurrent.CountDownLatch(1)
+        pendingSensitiveConfirmLatch = latch
+        pendingSensitiveConfirmApproved = false
+
+        val completed = latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        val approved = completed && pendingSensitiveConfirmApproved
+
+        taskSessionStore.resumeFromWait()
+        TaskRecordingCoordinator.markDeviceActive()
+        pendingSensitiveConfirmLatch = null
+        pendingSensitiveConfirmApproved = false
+
+        taskEventCallback?.invoke(TaskEvent.SensitiveConfirmResult(approved))
+
+        // Restore the target app on EVERY exit path (approve / deny / timeout), same
+        // contract as onScreenshotBlocked, so the agent keeps driving the real target.
+        if (targetPackage.isNotBlank()) {
+            try {
+                LocalAdbDeviceDriver.openApp(targetPackage)
+                Thread.sleep(500)
+            } catch (e: Exception) {
+                XLog.w(TAG, "awaitSensitiveConfirmation: failed to restore target app", e)
+            }
+        }
+
+        XLog.i(TAG, "awaitSensitiveConfirmation: approved=$approved (completed=$completed)")
+        return approved
+    }
+
+    /**
      * Start a new task. Routes through the 3-tier pipeline.
      */
     fun startNewTask(
@@ -229,12 +342,20 @@ class TaskOrchestrator(
         messageID: String,
         agentPromptOverride: String? = null,
         isFallback: Boolean = false,
+        batchRun: BatchRunContext? = null,
     ) {
         // The pipeline contains blocking LLM calls (SkillAnalyzer). Running it on
         // the caller thread would freeze the chat UI and trigger an ANR when
         // invoked from the UI thread, so always run it on a worker thread.
         Thread({
-            startNewTaskInternal(channel, task, messageID, agentPromptOverride, isFallback)
+            startNewTaskInternal(
+                channel,
+                task,
+                messageID,
+                agentPromptOverride,
+                isFallback,
+                batchRun
+            )
         }, "task-pipeline").start()
     }
 
@@ -244,10 +365,18 @@ class TaskOrchestrator(
         messageID: String,
         agentPromptOverride: String? = null,
         isFallback: Boolean = false,
+        batchRun: BatchRunContext? = null,
     ) {
         // Acquire task lock if not already held
         if (!isTaskRunning()) {
-            if (!tryAcquireTask(messageID, channel, task)) {
+            if (!tryAcquireTask(
+                    messageID,
+                    channel,
+                    task,
+                    autoReturnToChat = batchRun == null,
+                    isBatch = batchRun != null
+                )
+            ) {
                 XLog.w(TAG, "Failed to acquire task lock for: $task")
                 taskEventCallback?.invoke(TaskEvent.Failed("Another task is running"))
                 return
@@ -265,7 +394,11 @@ class TaskOrchestrator(
                     "Rejecting new task while another task is still active: current=${current.messageId}/${current.channel} new=$messageID/$channel"
                 )
                 taskEventCallback?.invoke(TaskEvent.Failed("Another task is still running. Stop it first."))
-                ChannelManager.sendMessage(channel, "Another task is still running. Stop it first.", messageID)
+                ChannelManager.sendMessage(
+                    channel,
+                    "Another task is still running. Stop it first.",
+                    messageID
+                )
                 return
             }
         }
@@ -283,7 +416,10 @@ class TaskOrchestrator(
             is PipelineRouter.Route.DirectIntent -> {
                 XLog.i(TAG, "Pipeline Tier 1: DirectIntent — ${route.description}")
                 pipelineRouter.executeIntent(route.intent)
-                XLog.i(TAG, "onComplete: rounds=0, totalTokens=0, model=direct, answer=${route.description}")
+                XLog.i(
+                    TAG,
+                    "onComplete: rounds=0, totalTokens=0, model=direct, answer=${route.description}"
+                )
                 taskEventCallback?.invoke(TaskEvent.Completed(route.description))
                 ChannelManager.sendMessage(channel, "✓ ${route.description}", messageID)
                 releaseTask()
@@ -292,6 +428,7 @@ class TaskOrchestrator(
                 onTaskFinished()
                 return
             }
+
             is PipelineRouter.Route.DirectTool -> {
                 XLog.i(TAG, "Pipeline Tier 1: DirectTool — ${route.toolName}")
                 Thread({
@@ -302,8 +439,17 @@ class TaskOrchestrator(
                         if (!toolResult.isSuccess) {
                             val error = toolResult.error ?: "Unknown error"
                             XLog.w(TAG, "Tier 1 tool failed: $error")
-                            taskEventCallback?.invoke(TaskEvent.Failed("${route.description}: $error", TaskReasonCode.OTHER))
-                            ChannelManager.sendMessage(channel, "✗ ${route.description}: $error", messageID)
+                            taskEventCallback?.invoke(
+                                TaskEvent.Failed(
+                                    "${route.description}: $error",
+                                    TaskReasonCode.OTHER
+                                )
+                            )
+                            ChannelManager.sendMessage(
+                                channel,
+                                "✗ ${route.description}: $error",
+                                messageID
+                            )
                             "Failed: ${route.description}: $error"
                         } else {
                             success = true
@@ -315,7 +461,11 @@ class TaskOrchestrator(
                         val message = e.message ?: "Unknown error"
                         XLog.e(TAG, "Tier 1 tool crashed: ${route.toolName}", e)
                         taskEventCallback?.invoke(TaskEvent.Failed(message))
-                        ChannelManager.sendMessage(channel, "✗ ${route.description}: $message", messageID)
+                        ChannelManager.sendMessage(
+                            channel,
+                            "✗ ${route.description}: $message",
+                            messageID
+                        )
                         "Failed: ${route.description}: $message"
                     } finally {
                         releaseTask(if (success) RecordingOutcome.COMPLETED else RecordingOutcome.FAILED)
@@ -331,9 +481,13 @@ class TaskOrchestrator(
                 }, "direct-tool-${route.toolName}").start()
                 return
             }
+
             is PipelineRouter.Route.Skill -> {
                 if (isFallback) {
-                    XLog.i(TAG, "Skipping skill route on fallback, going to agent loop: ${route.skillId}")
+                    XLog.i(
+                        TAG,
+                        "Skipping skill route on fallback, going to agent loop: ${route.skillId}"
+                    )
                 } else {
                     XLog.i(TAG, "Pipeline Tier 2: Skill — ${route.skillId}")
                     val skill = SkillRegistry.findById(route.skillId)
@@ -342,11 +496,20 @@ class TaskOrchestrator(
                         FloatingCircleManager.showTaskNotify(task, channel)
                         Thread({
                             TaskRecordingCoordinator.start("skill:${route.skillId}")
-                            val skillResult = skillExecutor.execute(skill, route.params) { step, total, desc ->
-                                TaskRecordingCoordinator.markDeviceActive()
-                                taskEventCallback?.invoke(TaskEvent.Progress(step, "Step $step/$total: $desc"))
-                                ForegroundService.updateTaskStatus(ClawApplication.instance, desc)
-                            }
+                            val skillResult =
+                                skillExecutor.execute(skill, route.params) { step, total, desc ->
+                                    TaskRecordingCoordinator.markDeviceActive()
+                                    taskEventCallback?.invoke(
+                                        TaskEvent.Progress(
+                                            step,
+                                            "Step $step/$total: $desc"
+                                        )
+                                    )
+                                    ForegroundService.updateTaskStatus(
+                                        ClawApplication.instance,
+                                        desc
+                                    )
+                                }
                             if (skillResult.success) {
                                 ChannelManager.sendMessage(channel, skillResult.message, messageID)
                                 taskEventCallback?.invoke(TaskEvent.Completed(skillResult.message))
@@ -356,11 +519,25 @@ class TaskOrchestrator(
                                 onTaskFinished()
                             } else {
                                 val fallbackGoal = skill.fallbackGoal
-                                    .let { g -> route.params.entries.fold(g) { acc, (k, v) -> acc.replace("{$k}", v) } }
-                                XLog.i(TAG, "Skill ${skill.id} failed, falling back to agent loop: $fallbackGoal")
+                                    .let { g ->
+                                        route.params.entries.fold(g) { acc, (k, v) ->
+                                            acc.replace(
+                                                "{$k}",
+                                                v
+                                            )
+                                        }
+                                    }
+                                XLog.i(
+                                    TAG,
+                                    "Skill ${skill.id} failed, falling back to agent loop: $fallbackGoal"
+                                )
                                 taskEventCallback?.invoke(TaskEvent.ToolAction("Retrying with AI agent"))
                                 taskEventCallback?.invoke(
-                                    TaskEvent.ToolResult("Retrying with AI agent", false, skillResult.message)
+                                    TaskEvent.ToolResult(
+                                        "Retrying with AI agent",
+                                        false,
+                                        skillResult.message
+                                    )
                                 )
                                 startNewTask(channel, fallbackGoal, messageID, isFallback = true)
                             }
@@ -370,6 +547,7 @@ class TaskOrchestrator(
                     XLog.w(TAG, "Skill ${route.skillId} not found, falling through to agent loop")
                 }
             }
+
             is PipelineRouter.Route.Chat, is PipelineRouter.Route.AgentLoop -> {
                 // Fall through to agent loop
             }
@@ -377,7 +555,81 @@ class TaskOrchestrator(
 
         // Tier 1.8: LLM-based Skill matching (scenarios 1-4)
         var sessionMatchResult: SkillMatchResult? = null
-        if (!isFallback) {
+        if (batchRun != null) {
+            // === Batch mode: just-in-time (JIT) skill resolution ===
+            // A batch task carries NO add-time skill state — it is queued as plain text and re-decided
+            // HERE at dispatch against the live skill store, so every (re)run reflects the current world
+            // (a skill added/deleted, a template circuit-broken by failures, the target app updated, or an
+            // identical task earlier in THIS batch already learned the skill). We reuse chat's Tier 1.8
+            // matcher but WITHOUT chat's replay-confirmation latch (awaitReplayConfirmation has no timeout
+            // and would hang an unattended queue); runBatchSkillReplay replays with no prompt. Switch C
+            // (preferReplay) decides replay-vs-AI on a FullMatch; switch B (autoSaveSkill) only words the
+            // note below — the real save gate lives in BatchTaskDriver. Post-completion save/update/discard
+            // still flows from sessionMatchResult through the SHARED onComplete, so batch stays consistent
+            // with chat rules by construction.
+            if (!KVUtils.isSkillCaptureModeEnabled()) {
+                // Switch A is the authoritative gate: capture off => the whole skill pipeline is inert,
+                // exactly like chat A-off — plain AgentLoop, no recording, no save.
+                SkillRecorder.disableRecording()
+                taskEventCallback?.invoke(
+                    TaskEvent.Progress(
+                        0,
+                        "ℹ️ Skill capture is off — running with AI; nothing will be recorded or saved"
+                    )
+                )
+                XLog.i(TAG, "Batch JIT: capture off — plain AgentLoop, no save")
+            } else {
+                // Fresh match against the LIVE store: L0 exact-text first; the LLM analyzer only when that
+                // switch is on (same policy as chat dispatch).
+                val resolved: SkillMatchResult = runCatching {
+                    val analysis =
+                        if (KVUtils.isLlmSkillMatchingEnabled()) SkillAnalyzer.analyze(task) else null
+                    SkillMatcher.match(task, analysis)
+                }.getOrDefault(SkillMatchResult.NoMatch)
+
+                // Transparency: state HOW this task will actually run, from the live match plus switches
+                // C (preferReplay) and B (autoSaveSkill).
+                emitBatchJitNote(resolved, batchRun.preferReplay, batchRun.autoSaveSkill)
+
+                if (resolved is SkillMatchResult.FullMatch && batchRun.preferReplay) {
+                    // A usable (env-matched + available) template exists AND switch C prefers replay —
+                    // replay it, no confirmation latch.
+                    XLog.i(
+                        TAG,
+                        "Batch JIT: replay skill=${resolved.skill.skillId}, template=${resolved.template.templateId}"
+                    )
+                    runBatchSkillReplay(
+                        channel,
+                        task,
+                        messageID,
+                        resolved.skill,
+                        resolved.template,
+                        resolved.extractedParams
+                    ) {
+                        isCurrentSessionActive()
+                    }
+                    return
+                }
+                // AI run path. A FullMatch with switch C OFF must still UPDATE the matched template on
+                // success, but onComplete only builds a save for SkillOnly/NoMatch — so downgrade the
+                // FullMatch to SkillOnly(degradedTemplateId) here, mirroring chat's replay-decline path.
+                // SkillOnly (template unavailable / none) and NoMatch pass through unchanged.
+                val effective: SkillMatchResult =
+                    if (resolved is SkillMatchResult.FullMatch) {
+                        SkillMatchResult.SkillOnly(
+                            resolved.skill,
+                            degradedTemplateId = resolved.template.templateId
+                        )
+                    } else resolved
+                SkillRecorder.enableRecording()
+                sessionMatchResult = effective
+                XLog.i(
+                    TAG,
+                    "Batch JIT: AI run, resolved=$effective (preferReplay=${batchRun.preferReplay})"
+                )
+            }
+        }
+        if (!isFallback && batchRun == null) {
             if (KVUtils.isSkillCaptureModeEnabled()) {
                 SkillRecorder.enableRecording()
 
@@ -416,13 +668,20 @@ class TaskOrchestrator(
 
                 when (val match = sessionMatchResult) {
                     is SkillMatchResult.FullMatch -> {
-                        XLog.i(TAG, "Pipeline Tier 1.8: full match — skill=${match.skill.skillId}, template=${match.template.templateId}")
+                        XLog.i(
+                            TAG,
+                            "Pipeline Tier 1.8: full match — skill=${match.skill.skillId}, template=${match.template.templateId}"
+                        )
                         // Let the user review the matched template before touching the
                         // device. Declining degrades to the no-usable-template scenario:
                         // AgentLoop re-runs the task with recording on, and afterwards
                         // the user is offered to update the template in place.
                         taskEventCallback?.invoke(
-                            TaskEvent.ReplayConfirmRequest(match.skill, match.template, match.extractedParams)
+                            TaskEvent.ReplayConfirmRequest(
+                                match.skill,
+                                match.template,
+                                match.extractedParams
+                            )
                         )
                         val replayConfirmed = awaitReplayConfirmation()
                         if (!isCurrentSessionActive()) {
@@ -430,10 +689,15 @@ class TaskOrchestrator(
                             return
                         }
                         if (!replayConfirmed) {
-                            XLog.i(TAG, "Replay declined — degrading to agent loop, template " +
-                                    "${match.template.templateId} offered for update afterwards")
+                            XLog.i(
+                                TAG, "Replay declined — degrading to agent loop, template " +
+                                        "${match.template.templateId} offered for update afterwards"
+                            )
                             taskEventCallback?.invoke(
-                                TaskEvent.Progress(0, "⏭️ Replay declined — running \"${match.skill.title}\" with AI agent")
+                                TaskEvent.Progress(
+                                    0,
+                                    "⏭️ Replay declined — running \"${match.skill.title}\" with AI agent"
+                                )
                             )
                             sessionMatchResult = SkillMatchResult.SkillOnly(
                                 match.skill,
@@ -444,7 +708,12 @@ class TaskOrchestrator(
                             FloatingCircleManager.ensureShowing()
                             FloatingCircleManager.showTaskNotify(task, channel)
                             Thread({
-                                taskEventCallback?.invoke(TaskEvent.ReplayStart(match.skill.title, match.template.steps.size))
+                                taskEventCallback?.invoke(
+                                    TaskEvent.ReplayStart(
+                                        match.skill.title,
+                                        match.template.steps.size
+                                    )
+                                )
                                 // After the ReplayStart event and before any device action, so the
                                 // recording never starts mid-gesture.
                                 TaskRecordingCoordinator.start("replay:${match.skill.skillId}")
@@ -452,14 +721,26 @@ class TaskOrchestrator(
                                     skill = match.skill,
                                     template = match.template,
                                     extractedParams = match.extractedParams,
-                                    isSessionActive = { isCurrentSessionActive() }
+                                    isSessionActive = { isCurrentSessionActive() },
+                                    sensitiveGate = { summary, riskType ->
+                                        if (!io.agents.bqaagent.utils.KVUtils.isSensitiveConfirmEnabled()) true
+                                        else awaitSensitiveConfirmation(
+                                            { isCurrentSessionActive() },
+                                            summary,
+                                            riskType,
+                                            io.agents.bqaagent.agent.DefaultAgentService.SENSITIVE_CONFIRM_TIMEOUT_MS
+                                        )
+                                    }
                                 )
                                 activeReplayer = replayer
                                 val replayResult = try {
                                     replayer.replay(
                                         onStepProgress = { _, _, desc ->
                                             TaskRecordingCoordinator.markDeviceActive()
-                                            ForegroundService.updateTaskStatus(ClawApplication.instance, desc)
+                                            ForegroundService.updateTaskStatus(
+                                                ClawApplication.instance,
+                                                desc
+                                            )
                                         },
                                         onStepResult = { step, total, name, success, detail, durationMs, params ->
                                             TaskRecordingCoordinator.markDeviceActive()
@@ -467,7 +748,17 @@ class TaskOrchestrator(
                                                 "replay-step",
                                                 "$step/$total $name ${if (success) "ok" else "fail"}"
                                             )
-                                            taskEventCallback?.invoke(TaskEvent.ReplayStep(step, total, name, success, detail, durationMs, params))
+                                            taskEventCallback?.invoke(
+                                                TaskEvent.ReplayStep(
+                                                    step,
+                                                    total,
+                                                    name,
+                                                    success,
+                                                    detail,
+                                                    durationMs,
+                                                    params
+                                                )
+                                            )
                                         }
                                     )
                                 } finally {
@@ -476,7 +767,8 @@ class TaskOrchestrator(
                                 if (replayResult.success) {
                                     // Scenario 4: replay succeeded — bring user back to chat UI first
                                     returnToAgentApp()
-                                    val answer = "✅ Replay succeeded — skill \"${match.skill.title}\"\n${replayResult.message}"
+                                    val answer =
+                                        "✅ Replay succeeded — skill \"${match.skill.title}\"\n${replayResult.message}"
                                     ChannelManager.sendMessage(channel, answer, messageID)
                                     taskEventCallback?.invoke(TaskEvent.Completed(answer))
                                     releaseTask(RecordingOutcome.COMPLETED)
@@ -487,14 +779,41 @@ class TaskOrchestrator(
                                     // User stopped the task — cleanup was already done by
                                     // cancelCurrentTask(); do NOT fall back to the agent loop.
                                     XLog.i(TAG, "Replay cancelled by user, skipping fallback")
-                                } else {
-                                    // Scenario 3: replay failed — return to chat UI, report, then degrade to AgentLoop
+                                } else if (replayResult.rejected) {
+                                    // User denied a sensitive step (or the confirm dialog timed
+                                    // out) — terminal FAILED, do NOT fall back to the agent loop.
+                                    XLog.w(TAG, "Replay rejected at sensitive step, terminating without fallback")
                                     returnToAgentApp()
-                                    XLog.i(TAG, "Skill replay failed: ${replayResult.message}, falling back to agent loop")
-                                    taskEventCallback?.invoke(TaskEvent.Progress(0, "❌ Replay failed — skill \"${match.skill.title}\": ${replayResult.message}"))
+                                    val rejectText = "Task failed: ${replayResult.message}"
+                                    taskEventCallback?.invoke(
+                                        TaskEvent.Failed(rejectText, TaskReasonCode.SENSITIVE_CONFIRM)
+                                    )
+                                    ChannelManager.sendMessage(channel, rejectText, messageID)
+                                    ChannelManager.flushMessages(channel)
+                                    releaseTask(RecordingOutcome.FAILED)
+                                    FloatingCircleManager.setErrorState()
+                                    ForegroundService.resetToIdle(ClawApplication.instance)
+                                    onTaskFinished()
+                                } else {
+                                    // Scenario 3: replay failed — return to chat UI, report, then degrade to AgentLoo
+                                    returnToAgentApp()
+                                    XLog.i(
+                                        TAG,
+                                        "Skill replay failed: ${replayResult.message}, falling back to agent loop"
+                                    )
+                                    taskEventCallback?.invoke(
+                                        TaskEvent.Progress(
+                                            0,
+                                            "❌ Replay failed — skill \"${match.skill.title}\": ${replayResult.message}"
+                                        )
+                                    )
                                     taskEventCallback?.invoke(TaskEvent.ToolAction("Retrying with AI agent"))
                                     taskEventCallback?.invoke(
-                                        TaskEvent.ToolResult("Retrying with AI agent", false, "Replay failed")
+                                        TaskEvent.ToolResult(
+                                            "Retrying with AI agent",
+                                            false,
+                                            "Replay failed"
+                                        )
                                     )
                                     startNewTask(channel, task, messageID, isFallback = true)
                                 }
@@ -502,18 +821,27 @@ class TaskOrchestrator(
                             return
                         }
                     }
+
                     is SkillMatchResult.SkillOnly -> {
 
                         // Scenario 2: skill matched but no usable template — AgentLoop will
                         // auto-create a new template on completion
-                        XLog.i(TAG, "Pipeline Tier 1.8: scenario 2 — skill=${match.skill.skillId}, no usable template")
+                        XLog.i(
+                            TAG,
+                            "Pipeline Tier 1.8: scenario 2 — skill=${match.skill.skillId}, no usable template"
+                        )
                     }
+
                     is SkillMatchResult.NoMatch -> {
                         // Scenario 1: no matching skill — offer save after AgentLoop completes
                         XLog.i(TAG, "Pipeline Tier 1.8: scenario 1 — no matching skill")
                     }
+
                     null -> {
-                        XLog.i(TAG, "Pipeline Tier 1.8: matching skipped or failed, using agent loop")
+                        XLog.i(
+                            TAG,
+                            "Pipeline Tier 1.8: matching skipped or failed, using agent loop"
+                        )
                     }
                 }
             } else {
@@ -523,7 +851,7 @@ class TaskOrchestrator(
                 SkillRecorder.disableRecording()
                 XLog.i(TAG, "Skill Capture Mode off: skill recording/save/replay disabled")
             }
-        } else {
+        } else if (isFallback) {
             // Fallback after replay failure (scenario 3): do not record the mixed flow
             SkillRecorder.disableRecording()
         }
@@ -533,7 +861,11 @@ class TaskOrchestrator(
             releaseTask(RecordingOutcome.FAILED)
             ForegroundService.resetToIdle(ClawApplication.instance)
             taskEventCallback?.invoke(TaskEvent.Failed("AI service not ready"))
-            ChannelManager.sendMessage(channel, ClawApplication.instance.getString(R.string.channel_msg_service_not_ready), messageID)
+            ChannelManager.sendMessage(
+                channel,
+                ClawApplication.instance.getString(R.string.channel_msg_service_not_ready),
+                messageID
+            )
             return
         }
 
@@ -547,7 +879,11 @@ class TaskOrchestrator(
                 releaseTask(RecordingOutcome.FAILED)
                 ForegroundService.resetToIdle(ClawApplication.instance)
                 taskEventCallback?.invoke(TaskEvent.Failed("AI service not ready"))
-                ChannelManager.sendMessage(channel, ClawApplication.instance.getString(R.string.channel_msg_service_not_ready), messageID)
+                ChannelManager.sendMessage(
+                    channel,
+                    ClawApplication.instance.getString(R.string.channel_msg_service_not_ready),
+                    messageID
+                )
                 return
             }
         }
@@ -591,19 +927,22 @@ class TaskOrchestrator(
                     step = status.step,
                     formattedTokens = status.formattedTokens,
                     formattedCost = status.formattedCost,
-                    tokenState = status.state
-                )
-                taskEventCallback?.invoke(TaskEvent.TokenUpdate(
-                    step = status.step,
-                    formattedTokens = status.formattedTokens,
-                    formattedCost = status.formattedCost,
                     tokenState = status.state,
-                    totalTokens = status.totalTokens,
-                    inputTokens = status.inputTokens,
-                    outputTokens = status.outputTokens,
-                    estimatedCostUsd = status.estimatedCostUsd,
                     intent = status.intent
-                ))
+                )
+                taskEventCallback?.invoke(
+                    TaskEvent.TokenUpdate(
+                        step = status.step,
+                        formattedTokens = status.formattedTokens,
+                        formattedCost = status.formattedCost,
+                        tokenState = status.state,
+                        totalTokens = status.totalTokens,
+                        inputTokens = status.inputTokens,
+                        outputTokens = status.outputTokens,
+                        estimatedCostUsd = status.estimatedCostUsd,
+                        intent = status.intent
+                    )
+                )
             }
 
             override fun onContent(round: Int, content: String) {
@@ -615,7 +954,12 @@ class TaskOrchestrator(
                 }
             }
 
-            override fun onToolCall(round: Int, toolId: String, toolName: String, parameters: String) {
+            override fun onToolCall(
+                round: Int,
+                toolId: String,
+                toolName: String,
+                parameters: String
+            ) {
                 if (!isCurrentSessionActive()) return
                 // The device is about to be touched: defer segment rotation out of this window.
                 TaskRecordingCoordinator.markDeviceActive()
@@ -630,13 +974,25 @@ class TaskOrchestrator(
                     ForegroundService.updateTaskStatus(ClawApplication.instance, "Running task...")
                 }
                 if (toolName.isNotEmpty()) {
-                    val displayName = io.agents.bqaagent.tool.ToolRegistry.getInstance().getDisplayName(toolName)
-                    taskEventCallback?.invoke(TaskEvent.ToolAction(displayName, formatToolParams(parameters)))
+                    val displayName =
+                        io.agents.bqaagent.tool.ToolRegistry.getInstance().getDisplayName(toolName)
+                    taskEventCallback?.invoke(
+                        TaskEvent.ToolAction(
+                            displayName,
+                            formatToolParams(parameters)
+                        )
+                    )
                     ForegroundService.updateTaskStatus(ClawApplication.instance, "$displayName...")
                 }
             }
 
-            override fun onToolResult(round: Int, toolId: String, toolName: String, parameters: String, result: ToolResult) {
+            override fun onToolResult(
+                round: Int,
+                toolId: String,
+                toolName: String,
+                parameters: String,
+                result: ToolResult
+            ) {
                 if (!isCurrentSessionActive()) return
                 // ScreenSettleWaiter may still be sampling after an action tool — stay unsafe.
                 TaskRecordingCoordinator.markDeviceActive()
@@ -646,7 +1002,8 @@ class TaskOrchestrator(
                 if (data != null && data.length > 300) data = data.substring(0, 300) + "..."
                 if (!success) XLog.e(TAG, "Tool failed: $toolName $data")
 
-                val displayName = io.agents.bqaagent.tool.ToolRegistry.getInstance().getDisplayName(toolName)
+                val displayName =
+                    io.agents.bqaagent.tool.ToolRegistry.getInstance().getDisplayName(toolName)
                 taskEventCallback?.invoke(TaskEvent.ToolResult(displayName, success, data ?: ""))
 
                 if (toolId == "finish" && result.data?.isNotEmpty() == true) {
@@ -654,17 +1011,33 @@ class TaskOrchestrator(
                     ChannelManager.sendMessage(channel, result.data, messageID)
                 } else {
                     if (roundBuffer.isNotEmpty()) roundBuffer.append("\n")
-                    roundBuffer.append(app.getString(R.string.channel_msg_tool_execution, toolName + parameters,
-                        if (success) app.getString(R.string.channel_msg_tool_success) else app.getString(R.string.channel_msg_tool_failure)))
+                    roundBuffer.append(
+                        app.getString(
+                            R.string.channel_msg_tool_execution, toolName + parameters,
+                            if (success) app.getString(R.string.channel_msg_tool_success) else app.getString(
+                                R.string.channel_msg_tool_failure
+                            )
+                        )
+                    )
                 }
             }
 
-            override fun onComplete(round: Int, finalAnswer: String, totalTokens: Int, modelName: String?, status: TaskStatus, reasonCode: String?) {
+            override fun onComplete(
+                round: Int,
+                finalAnswer: String,
+                totalTokens: Int,
+                modelName: String?,
+                status: TaskStatus,
+                reasonCode: String?
+            ) {
                 if (!isCurrentSessionActive()) {
                     XLog.i(TAG, "Ignoring stale onComplete after task cancellation")
                     return
                 }
-                XLog.i(TAG, "onComplete: rounds=$round, totalTokens=$totalTokens, model=$modelName, status=$status, reason=$reasonCode, answer=$finalAnswer")
+                XLog.i(
+                    TAG,
+                    "onComplete: rounds=$round, totalTokens=$totalTokens, model=$modelName, status=$status, reason=$reasonCode, answer=$finalAnswer"
+                )
 
                 // 1) User cancellation — highest priority.
                 if (status == TaskStatus.CANCELLED) {
@@ -689,7 +1062,12 @@ class TaskOrchestrator(
                 // 2) System-decided stop (token/iteration/stuck/sensitive/unusable/image).
                 if (status == TaskStatus.STOPPED) {
                     SkillRecorder.discard()
-                    taskEventCallback?.invoke(TaskEvent.Stopped(reasonCode ?: TaskReasonCode.OTHER, finalAnswer))
+                    taskEventCallback?.invoke(
+                        TaskEvent.Stopped(
+                            reasonCode ?: TaskReasonCode.OTHER,
+                            finalAnswer
+                        )
+                    )
                     ForegroundService.resetToIdle(ClawApplication.instance)
                     flushRoundBuffer()
                     val stoppedSession = releaseTask(RecordingOutcome.STOPPED)
@@ -707,7 +1085,12 @@ class TaskOrchestrator(
                 if (status == TaskStatus.FAILED) {
                     SkillRecorder.discard()
                     val failureText = finalAnswer.ifEmpty { "Task could not be completed." }
-                    taskEventCallback?.invoke(TaskEvent.Failed(failureText, reasonCode ?: TaskReasonCode.OTHER))
+                    taskEventCallback?.invoke(
+                        TaskEvent.Failed(
+                            failureText,
+                            reasonCode ?: TaskReasonCode.OTHER
+                        )
+                    )
                     ForegroundService.resetToIdle(ClawApplication.instance)
                     flushRoundBuffer()
                     val failedSession = releaseTask(RecordingOutcome.FAILED)
@@ -723,7 +1106,8 @@ class TaskOrchestrator(
 
                 // 4) SUCCESS (reasonCode TASK_SUCCESS or CHAT_ONLY).
                 var answer = finalAnswer.ifEmpty { "Done." }
-                answer = answer.removePrefix("Task completed:").removePrefix("Task completed").trim()
+                answer =
+                    answer.removePrefix("Task completed:").removePrefix("Task completed").trim()
                 if (answer.isEmpty()) answer = "Done."
 
                 val isChatOnly = reasonCode == TaskReasonCode.CHAT_ONLY
@@ -744,8 +1128,12 @@ class TaskOrchestrator(
                                         matchedSkill = match.skill,
                                         degradedTemplateId = match.degradedTemplateId
                                     )
-                                    XLog.i(TAG, "Scenario 2: template save offered to UI for skill ${match.skill.skillId}")
+                                    XLog.i(
+                                        TAG,
+                                        "Scenario 2: template save offered to UI for skill ${match.skill.skillId}"
+                                    )
                                 }
+
                                 is SkillMatchResult.NoMatch -> {
                                     skillSaveData = SkillSaveData(
                                         recordingSession = session,
@@ -753,6 +1141,7 @@ class TaskOrchestrator(
                                     )
                                     XLog.i(TAG, "Scenario 1: skill save offered to UI")
                                 }
+
                                 is SkillMatchResult.FullMatch, null -> Unit
                             }
                         }
@@ -761,7 +1150,14 @@ class TaskOrchestrator(
                     }
                 }
 
-                taskEventCallback?.invoke(TaskEvent.Completed(answer, modelName, skillSaveData, reasonCode ?: TaskReasonCode.TASK_SUCCESS))
+                taskEventCallback?.invoke(
+                    TaskEvent.Completed(
+                        answer,
+                        modelName,
+                        skillSaveData,
+                        reasonCode ?: TaskReasonCode.TASK_SUCCESS
+                    )
+                )
                 ForegroundService.resetToIdle(ClawApplication.instance)
                 flushRoundBuffer()
                 val completedSession = releaseTask(RecordingOutcome.COMPLETED)
@@ -787,7 +1183,10 @@ class TaskOrchestrator(
                 val stoppedMessageId = stoppedSession.messageId.ifEmpty { messageID }
                 ChannelManager.sendMessage(
                     stoppedChannel,
-                    ClawApplication.instance.getString(R.string.channel_msg_task_error, errorMessage),
+                    ClawApplication.instance.getString(
+                        R.string.channel_msg_task_error,
+                        errorMessage
+                    ),
                     stoppedMessageId
                 )
                 ChannelManager.flushMessages(stoppedChannel)
@@ -800,8 +1199,14 @@ class TaskOrchestrator(
                 if (!isCurrentSessionActive()) return
                 XLog.w(TAG, "onSystemDialogBlocked: round=$round, totalTokens=$totalTokens")
                 SkillRecorder.discard()
-                val blockedMessage = ClawApplication.instance.getString(R.string.channel_msg_system_dialog_blocked)
-                taskEventCallback?.invoke(TaskEvent.Stopped(TaskReasonCode.SYSTEM_DIALOG, blockedMessage))
+                val blockedMessage =
+                    ClawApplication.instance.getString(R.string.channel_msg_system_dialog_blocked)
+                taskEventCallback?.invoke(
+                    TaskEvent.Stopped(
+                        TaskReasonCode.SYSTEM_DIALOG,
+                        blockedMessage
+                    )
+                )
                 flushRoundBuffer()
                 val blockedSession = releaseTask(RecordingOutcome.STOPPED)
                 val blockedChannel = blockedSession.channel ?: channel
@@ -824,23 +1229,32 @@ class TaskOrchestrator(
                 if (!isCurrentSessionActive()) return null
                 XLog.i(TAG, "onScreenshotBlocked: round=$round, intent=${intent.take(80)}")
 
+                // Batch tasks live in BatchActivity; chat tasks in ComposeChatActivity. Foreground the
+                // screen that actually hosts this task's upload UI.
+                val isBatch = taskSessionStore.snapshot().isBatch
+
                 val targetPackage = try {
                     LocalAdbDeviceDriver.foregroundPackageName()
                 } catch (e: Exception) {
                     XLog.w(TAG, "Failed to get foreground package", e)
                     ""
                 }
-                XLog.i(TAG, "onScreenshotBlocked: targetPackage=$targetPackage")
+                XLog.i(TAG, "onScreenshotBlocked: targetPackage=$targetPackage, isBatch=$isBatch")
 
                 taskSessionStore.markWaitingUserImage()
                 // Waiting for the user: the device is idle and BQAAgent is about to be foregrounded.
                 TaskRecordingCoordinator.markDeviceIdle()
                 taskEventCallback?.invoke(TaskEvent.ScreenshotBlocked(intent, timeoutMs))
 
-                // Bring BQAAgent to foreground so user can see the upload UI
+                // Bring BQAAgent to foreground so the user can see the upload UI (batch -> BatchActivity).
                 try {
                     val context = ClawApplication.instance
-                    val bringIntent = android.content.Intent(context, io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java).apply {
+                    val foregroundTarget = if (isBatch) {
+                        io.agents.bqaagent.ui.batch.BatchActivity::class.java
+                    } else {
+                        io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java
+                    }
+                    val bringIntent = android.content.Intent(context, foregroundTarget).apply {
                         flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
                                 android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
                     }
@@ -862,6 +1276,18 @@ class TaskOrchestrator(
                 pendingUserImageLatch = null
                 pendingUserImagePath = null
 
+                // Restore the target app on EVERY exit path (upload / skip / timeout). Previously only
+                // the success path did this, so after a skip the agent kept driving BQAAgent's own UI and
+                // every subsequent action missed the real target. Applies to both chat and batch.
+                if (targetPackage.isNotBlank()) {
+                    try {
+                        LocalAdbDeviceDriver.openApp(targetPackage)
+                        Thread.sleep(500)
+                    } catch (e: Exception) {
+                        XLog.w(TAG, "Failed to restore target app", e)
+                    }
+                }
+
                 if (!completed || resultPath == null) {
                     XLog.i(TAG, "User image request timed out or skipped")
                     if (resultPath != null) {
@@ -876,20 +1302,180 @@ class TaskOrchestrator(
                     return null
                 }
 
-                XLog.i(TAG, "User image received: $resultPath, restoring target app: $targetPackage")
-                if (targetPackage.isNotBlank()) {
-                    try {
-                        LocalAdbDeviceDriver.openApp(targetPackage)
-                        Thread.sleep(500)
-                    } catch (e: Exception) {
-                        XLog.w(TAG, "Failed to restore target app", e)
-                    }
-                }
-
+                XLog.i(TAG, "User image received: $resultPath")
                 taskEventCallback?.invoke(TaskEvent.UserImageProvided(resultPath))
                 return resultPath
             }
+
+            override fun onSensitiveConfirm(
+                round: Int,
+                actionSummary: String,
+                riskType: String,
+                timeoutMs: Long
+            ): Boolean {
+                return awaitSensitiveConfirmation(
+                    { isCurrentSessionActive() },
+                    actionSummary,
+                    riskType,
+                    timeoutMs
+                )
+            }
         })
+    }
+
+    /**
+     * Batch SKILL_REPLAY: run the bound skill/template directly. Differences from the chat FullMatch
+     * replay path (startNewTaskInternal L443-501), all per the confirmed batch rules:
+     *  - no awaitReplayConfirmation() — the batch already chose replay when the task was added, so
+     *    there is no latch and no way to hang the queue;
+     *  - on success, no returnToAgentApp() — the batch driver owns inter-task navigation and reset;
+     *  - on failure, no returnToAgentApp() — degrade to AgentLoop right there in the target app, and
+     *    isFallback=true keeps the mixed replay+agent flow unrecorded and unsaved.
+     * Runs on its own worker thread so startNewTaskInternal returns immediately, same as chat.
+     */
+    private fun runBatchSkillReplay(
+        channel: Channel,
+        task: String,
+        messageID: String,
+        skill: SkillDefinition,
+        template: ExecutionTemplate,
+        extractedParams: Map<String, String>,
+        isSessionActive: () -> Boolean,
+    ) {
+        FloatingCircleManager.ensureShowing()
+        FloatingCircleManager.showTaskNotify(task, channel)
+        Thread({
+            taskEventCallback?.invoke(TaskEvent.ReplayStart(skill.title, template.steps.size))
+            // After ReplayStart and before any device action, so recording never starts mid-gesture.
+            TaskRecordingCoordinator.start("replay:${skill.skillId}")
+            val replayer = SkillReplayer(
+                skill = skill,
+                template = template,
+                extractedParams = extractedParams,
+                isSessionActive = { isSessionActive() },
+                sensitiveGate = { summary, gateRiskType ->
+                    if (!io.agents.bqaagent.utils.KVUtils.isSensitiveConfirmEnabled()) true
+                    else awaitSensitiveConfirmation(
+                        { isSessionActive() },
+                        summary,
+                        gateRiskType,
+                        io.agents.bqaagent.agent.DefaultAgentService.SENSITIVE_CONFIRM_TIMEOUT_MS
+                    )
+                }
+            )
+            activeReplayer = replayer
+            val replayResult = try {
+                replayer.replay(
+                    onStepProgress = { _, _, desc ->
+                        TaskRecordingCoordinator.markDeviceActive()
+                        ForegroundService.updateTaskStatus(ClawApplication.instance, desc)
+                    },
+                    onStepResult = { step, total, name, success, detail, durationMs, params ->
+                        TaskRecordingCoordinator.markDeviceActive()
+                        TaskRecordingCoordinator.addMarker(
+                            "replay-step",
+                            "$step/$total $name ${if (success) "ok" else "fail"}"
+                        )
+                        taskEventCallback?.invoke(
+                            TaskEvent.ReplayStep(
+                                step,
+                                total,
+                                name,
+                                success,
+                                detail,
+                                durationMs,
+                                params
+                            )
+                        )
+                    }
+                )
+            } finally {
+                activeReplayer = null
+            }
+            if (replayResult.success) {
+                // Batch: do NOT returnToAgentApp — the driver resets/navigates before the next task.
+                val answer =
+                    "✅ Replay succeeded — skill \"${skill.title}\"\n${replayResult.message}"
+                ChannelManager.sendMessage(channel, answer, messageID)
+                taskEventCallback?.invoke(TaskEvent.Completed(answer))
+                releaseTask(RecordingOutcome.COMPLETED)
+                FloatingCircleManager.setSuccessState()
+                ForegroundService.resetToIdle(ClawApplication.instance)
+                onTaskFinished()
+            } else if (replayResult.cancelled) {
+                // User stopped the batch/task — cleanup already done by cancelCurrentTask(); no fallback.
+                XLog.i(TAG, "Batch replay cancelled by user, skipping fallback")
+            } else if (replayResult.rejected) {
+                // User denied a sensitive step (or the confirm dialog timed out) — terminal
+                // FAILED for this batch item; no fallback to AgentLoop. Batch owns navigation.
+                XLog.w(TAG, "Batch replay rejected at sensitive step, terminating without fallback")
+                val rejectText = "Task failed: ${replayResult.message}"
+                taskEventCallback?.invoke(
+                    TaskEvent.Failed(rejectText, TaskReasonCode.SENSITIVE_CONFIRM)
+                )
+                ChannelManager.sendMessage(channel, rejectText, messageID)
+                releaseTask(RecordingOutcome.FAILED)
+                FloatingCircleManager.setErrorState()
+                ForegroundService.resetToIdle(ClawApplication.instance)
+                onTaskFinished()
+            } else {
+                // Batch: stay in the target app and degrade to AgentLoop there (no returnToAgentApp)
+                XLog.i(
+                    TAG,
+                    "Batch skill replay failed: ${replayResult.message}, falling back to agent loop"
+                )
+                taskEventCallback?.invoke(
+                    TaskEvent.Progress(
+                        0,
+                        "❌ Replay failed — skill \"${skill.title}\": ${replayResult.message}"
+                    )
+                )
+                taskEventCallback?.invoke(TaskEvent.ToolAction("Retrying with AI agent"))
+                taskEventCallback?.invoke(
+                    TaskEvent.ToolResult("Retrying with AI agent", false, "Replay failed")
+                )
+                startNewTask(channel, task, messageID, isFallback = true)
+            }
+        }, "batch-skill-replayer").start()
+    }
+
+    /**
+     * Transcript note describing HOW this batch task will actually run, emitted right after the JIT
+     * resolution. A batch task has no add-time execution mode, so there is nothing to "compare" — the
+     * note simply states the resolved path, driven by the live match plus switch C (preferReplay) and
+     * switch B (autoSaveSkill). Reuses TaskEvent.Progress, which BatchTranscriptBuilder renders as a
+     * SYSTEM line — the same channel the replay-failure fallback already uses. Chat never calls this.
+     */
+    private fun emitBatchJitNote(resolved: SkillMatchResult, preferReplay: Boolean, autoSaveSkill: Boolean) {
+        val note = when {
+            // Switch C on + a usable (env-matched, available) template => replay the recorded steps.
+            resolved is SkillMatchResult.FullMatch && preferReplay ->
+                "▶️ Matched skill \"${resolved.skill.title}\" — replaying recorded steps"
+
+            // Switch C off + a usable template => AI run that refreshes the matched template on success.
+            resolved is SkillMatchResult.FullMatch ->
+                if (autoSaveSkill)
+                    "🤖 Matched skill \"${resolved.skill.title}\" — running with AI; will update its template on success"
+                else
+                    "🤖 Matched skill \"${resolved.skill.title}\" — running with AI (auto-save off; template left unchanged)"
+
+            // Matched skill but no usable template (circuit-broken, or none for this environment).
+            resolved is SkillMatchResult.SkillOnly -> {
+                val why = if (resolved.degradedTemplateId != null) "template unavailable" else "no template for this environment"
+                if (autoSaveSkill)
+                    "🤖 Matched skill \"${resolved.skill.title}\" ($why) — running with AI; will save a working template on success"
+                else
+                    "🤖 Matched skill \"${resolved.skill.title}\" ($why) — running with AI (auto-save off)"
+            }
+
+            // No skill matched => learn a brand-new one on success when auto-save is on.
+            else ->
+                if (autoSaveSkill)
+                    "🤖 No matching skill — running with AI; will learn a new skill on success"
+                else
+                    "🤖 No matching skill — running with AI (auto-save off)"
+        }
+        taskEventCallback?.invoke(TaskEvent.Progress(0, note))
     }
 
     /**

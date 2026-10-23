@@ -82,7 +82,7 @@ sealed class TaskEvent {
 
     /**
      * Task stopped by system code (token/iteration limit, stuck, system dialog, unusable screen,
-     * sensitive policy, image-analysis termination, LLM/ADB error). Replaces the former Blocked.
+     * image-analysis termination, LLM/ADB error). Replaces the former Blocked.
      */
     data class Stopped(val reasonCode: String, val message: String) : TaskEvent()
 
@@ -91,6 +91,12 @@ sealed class TaskEvent {
 
     /** User provided an image (or skipped) in response to ScreenshotBlocked. */
     data class UserImageProvided(val imagePath: String?) : TaskEvent()
+
+    /** Sensitive-confirm gate raised — UI must show a confirmation dialog with a deadline. */
+    data class SensitiveConfirmRequest(val actionSummary: String, val riskType: String, val timeoutMs: Long) : TaskEvent()
+
+    /** User (or timeout) resolved the sensitive-confirm gate. */
+    data class SensitiveConfirmResult(val approved: Boolean) : TaskEvent()
 
     /** Thinking/content stream from LLM (non-streaming mode). */
     data class Thinking(val content: String) : TaskEvent()

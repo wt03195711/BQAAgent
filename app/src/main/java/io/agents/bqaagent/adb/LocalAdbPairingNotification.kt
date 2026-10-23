@@ -17,7 +17,10 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import io.agents.bqaagent.R
+import io.agents.bqaagent.ui.batch.BatchActivity
+import io.agents.bqaagent.ui.batch.BatchUiMode
 import io.agents.bqaagent.ui.chat.ComposeChatActivity
+import io.agents.bqaagent.utils.KVUtils
 import io.agents.bqaagent.utils.XLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -241,7 +244,11 @@ class LocalAdbPairingReceiver : BroadcastReceiver() {
 
     private fun returnToBqaAgent(context: Context) {
         runCatching {
-            val intent = Intent(context, ComposeChatActivity::class.java).apply {
+            val target = when (KVUtils.getLastUiMode()) {
+                BatchUiMode.BATCH -> BatchActivity::class.java
+                else -> ComposeChatActivity::class.java
+            }
+            val intent = Intent(context, target).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
                     Intent.FLAG_ACTIVITY_SINGLE_TOP

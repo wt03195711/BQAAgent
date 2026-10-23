@@ -22,6 +22,10 @@ data class TaskSessionState(
     val startedAtMillis: Long = 0L,
     val stopRequested: Boolean = false,
     val autoReturnToChat: Boolean = false,
+    // True when this session belongs to a batch run (BatchActivity) rather than a chat task
+    // (ComposeChatActivity). Lets the orchestrator foreground the correct screen when a task needs
+    // a user-uploaded screenshot.
+    val isBatch: Boolean = false,
 ) {
     val isRunning: Boolean
         get() = phase != TaskSessionPhase.IDLE && messageId.isNotEmpty()
@@ -48,6 +52,7 @@ class TaskSessionStore {
         channel: Channel,
         taskText: String = "",
         autoReturnToChat: Boolean = true,
+        isBatch: Boolean = false,
     ): Boolean {
         synchronized(lock) {
             if (_state.value.isRunning) return false
@@ -59,6 +64,7 @@ class TaskSessionStore {
                 startedAtMillis = System.currentTimeMillis(),
                 stopRequested = false,
                 autoReturnToChat = autoReturnToChat,
+                isBatch = isBatch,
             )
             return true
         }

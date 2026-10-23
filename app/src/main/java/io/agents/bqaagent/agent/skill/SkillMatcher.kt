@@ -1,5 +1,7 @@
 package io.agents.bqaagent.agent.skill
 
+import android.app.LocaleManager
+import android.content.res.Resources
 import android.os.Build
 import io.agents.bqaagent.ClawApplication
 import io.agents.bqaagent.utils.XLog
@@ -192,7 +194,13 @@ object SkillMatcher {
     fun buildCurrentEnvironment(packages: Collection<String>): EnvironmentInfo {
         val ctx = ClawApplication.instance
         val metrics = ctx.resources.displayMetrics
-        val locale = java.util.Locale.getDefault()
+        // Capture the PHONE's system locale / font scale, never the app-process defaults.
+        // BQAAgent supports a per-app language (AppCompatDelegate.setApplicationLocales); on Android 13+
+        // that override also swaps Locale.getDefault() and the app-context Configuration, which would make
+        // a recorded template falsely "mismatch" just because the BQAAgent UI language changed. The automated
+        // target apps follow the SYSTEM settings, so the environment fingerprint must follow them too.
+        val locale = systemLocale()
+        val sysConfig = Resources.getSystem().configuration
         return EnvironmentInfo(
             appVersions = packages.filter { it.isNotBlank() }.distinct()
                 .associateWith { resolveAppVersionCode(it) },
@@ -202,8 +210,26 @@ object SkillMatcher {
             screenHeight = metrics.heightPixels,
             brand = Build.BRAND,
             model = Build.MODEL,
-            fontScale = ctx.resources.configuration.fontScale
+            fontScale = sysConfig.fontScale
         )
+    }
+
+    /**
+     * The device's system locale, deliberately NOT [java.util.Locale.getDefault].
+     *
+     * On Android 13+ [LocaleManager.getSystemLocales] returns the system-wide locale list and is immune to
+     * the per-app language override. Below 13 (down to minSdk) the per-app override is an AppCompat backport
+     * applied to Activity base contexts only, and [Resources.getSystem] is the global system resources, so
+     * its Configuration always reflects the true system locale.
+     */
+    private fun systemLocale(): java.util.Locale {
+        val ctx = ClawApplication.instance
+        if (Build.VERSION.SDK_INT >= 33) {
+            val lm = ctx.getSystemService(LocaleManager::class.java)
+            val sys = lm?.systemLocales
+            if (sys != null && !sys.isEmpty) return sys.get(0)
+        }
+        return Resources.getSystem().configuration.locales.get(0)
     }
 
     fun resolveAppVersionCode(packageName: String): Int {

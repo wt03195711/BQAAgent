@@ -3,45 +3,34 @@
 
 package io.agents.bqaagent.ui.settings
 
-import android.graphics.Rect
 import android.os.Bundle
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
-import android.widget.EditText
-import android.widget.ScrollView
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.updatePadding
 import io.agents.bqaagent.R
+import io.agents.bqaagent.agent.SavedVlmProfile
+import io.agents.bqaagent.agent.SavedVlmProfilesStore
 import io.agents.bqaagent.agent.VlmConfigRepository
+import io.agents.bqaagent.agent.llm.SavedProfileLimits
 import io.agents.bqaagent.base.BaseActivity
 import io.agents.bqaagent.ui.chat.ThemeManager
+import io.agents.bqaagent.widget.AlertDialog
+import io.agents.bqaagent.widget.CloudModelConfigDialog
 import io.agents.bqaagent.widget.CommonToolbar
 import io.agents.bqaagent.widget.KButton
-import java.util.concurrent.Executors
-import kotlin.math.max
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 /**
  * Configuration page for VLM (Vision Language Model).
- *
- * Simplified compared to [LlmConfigActivity]:
- * - No provider switching (always Custom/OpenAI-compatible)
- * - No local model management
- * - Only 3 fields: API Key, Base URL, Model Name
- * - Test connection + Save
+ * Cloud configs are managed as a saved-profile list; add/edit happen in a
+ * shared [CloudModelConfigDialog]; each item can be enabled, disabled or deleted.
  */
 class VlmConfigActivity : BaseActivity() {
-
-    private val executor = Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,202 +56,201 @@ class VlmConfigActivity : BaseActivity() {
         // Views
         val tvStatus = findViewById<TextView>(R.id.tvVlmStatus)
         val tvStatusMeta = findViewById<TextView>(R.id.tvVlmStatusMeta)
-        val etApiKey = findViewById<EditText>(R.id.etVlmApiKey)
-        val etBaseUrl = findViewById<EditText>(R.id.etVlmBaseUrl)
-        val etModelName = findViewById<EditText>(R.id.etVlmModelName)
-        val tvConnectionStatus = findViewById<TextView>(R.id.tvVlmConnectionStatus)
-        val btnTest = findViewById<TextView>(R.id.btnVlmTestConnection)
-        val btnSave = findViewById<KButton>(R.id.btnVlmSave)
-        val btnClear = findViewById<TextView>(R.id.btnVlmClearApiKey)
-        val scrollView = findViewById<ScrollView>(R.id.scrollVlmContent)
+        val layoutSavedProfiles = findViewById<LinearLayout>(R.id.layoutSavedVlmProfiles)
+        val btnAddNew = findViewById<KButton>(R.id.btnAddNewVlmProfile)
 
-        // Apply theme colors
         tvStatus.setTextColor(tc.aiText)
         tvStatusMeta.setTextColor(tc.toolDefault)
 
-        // Load current config
-        val currentConfig = VlmConfigRepository.load()
-        etApiKey.setText(currentConfig.apiKey)
-        etBaseUrl.setText(currentConfig.baseUrl)
-        etModelName.setText(currentConfig.modelName)
+        // Migrate existing config into saved profiles (one-time)
+        SavedVlmProfilesStore.migrateFromCurrentIfNeeded()
 
-        // Update status card
-        updateStatusCard(tvStatus, tvStatusMeta, tc, currentConfig.isConfigured)
+        updateStatusCard(tvStatus, tvStatusMeta, VlmConfigRepository.isConfigured())
 
-        // Clear API key
-        btnClear.setOnClickListener {
-            etApiKey.setText("")
-            Toast.makeText(this, "API key cleared", Toast.LENGTH_SHORT).show()
-        }
-
-        // Keyboard-aware scrolling
-        installKeyboardAwareScrolling(scrollView, listOf(etApiKey, etBaseUrl, etModelName))
-
-        // Test Connection
-        btnTest.setOnClickListener {
-            val apiKey = etApiKey.text.toString().trim()
-            val baseUrl = etBaseUrl.text.toString().trim()
-            val modelName = etModelName.text.toString().trim()
-
-            if (baseUrl.isEmpty() || modelName.isEmpty()) {
-                Toast.makeText(this, "Enter Base URL and Model Name first", Toast.LENGTH_SHORT).show()
+        btnAddNew.setOnClickListener {
+            val profiles = SavedVlmProfilesStore.listProfiles()
+            if (profiles.size >= SavedProfileLimits.MAX_VLM_PROFILES) {
+                Toast.makeText(this, "Max ${SavedProfileLimits.MAX_VLM_PROFILES} configs allowed. Delete one first.", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
+            CloudModelConfigDialog.show(
+                context = this,
+                dialogTitle = "Add Vision Model",
+                preset = null
+            ) { input ->
+                val profile = SavedVlmProfile(
+                    id = SavedVlmProfilesStore.generateId(),
+                    title = input.title,
+                    apiKey = input.apiKey,
+                    baseUrl = input.baseUrl,
+                    modelName = input.modelName
+                )
+                SavedVlmProfilesStore.saveProfile(profile)
+                Toast.makeText(this, "Config saved. Tap Enable to use it.", Toast.LENGTH_SHORT).show()
+                recreate()
+            }
+        }
 
-            tvConnectionStatus.visibility = View.VISIBLE
-            tvConnectionStatus.text = "Testing connection..."
-            tvConnectionStatus.setTextColor(tc.toolDefault)
-            btnTest.isEnabled = false
-            btnTest.alpha = 0.6f
+        renderSavedProfiles(layoutSavedProfiles, tc)
+    }
 
-            executor.submit {
-                try {
-                    val result = testVlmConnection(apiKey, baseUrl, modelName)
-                    runOnUiThread {
-                        tvConnectionStatus.text = result
-                        tvConnectionStatus.setTextColor(tc.toolDefault)
-                        btnTest.isEnabled = true
-                        btnTest.alpha = 1f
-                    }
-                } catch (t: Throwable) {
-                    runOnUiThread {
-                        tvConnectionStatus.text = "Failed: ${t.message ?: t.javaClass.simpleName}"
-                        tvConnectionStatus.setTextColor(getColor(R.color.colorErrorPrimary))
-                        btnTest.isEnabled = true
-                        btnTest.alpha = 1f
+    private fun renderSavedProfiles(container: LinearLayout, tc: ThemeManager.ChatColors) {
+        container.removeAllViews()
+        val profiles = SavedVlmProfilesStore.listProfiles()
+        val activeId = SavedVlmProfilesStore.getActiveProfileId()
+
+        profiles.forEach { profile ->
+            val isActive = profile.id == activeId
+            val card = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(8) }
+                background = buildProfileCardBackground(isActive)
+            }
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+            }
+
+            val info = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+            val titleRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            titleRow.addView(TextView(this).apply {
+                text = profile.title
+                textSize = 14f
+                setTextColor(tc.aiText)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+            })
+            info.addView(titleRow)
+            info.addView(TextView(this).apply {
+                text = "${profile.modelName} · ${profile.baseUrl}"
+                textSize = 11f
+                setTextColor(tc.toolDefault)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+
+            val onToggle = {
+                if (isActive) {
+                    SavedVlmProfilesStore.disableActiveProfile()
+                } else {
+                    SavedVlmProfilesStore.enableProfile(profile.id)
+                }
+                recreate()
+            }
+
+            val selector = ImageView(this).apply {
+                setImageResource(
+                    if (isActive) R.drawable.icon_radio_selected
+                    else R.drawable.icon_radio_unselected
+                )
+                layoutParams = LinearLayout.LayoutParams(dp(22), dp(22)).apply {
+                    marginEnd = dp(12)
+                }
+                setOnClickListener { onToggle() }
+            }
+            card.setOnClickListener { onToggle() }
+
+            val btnEdit = TextView(this).apply {
+                text = "Edit"
+                textSize = 12f
+                setTextColor(getColor(R.color.colorBrandPrimary))
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setOnClickListener {
+                    CloudModelConfigDialog.show(
+                        context = this@VlmConfigActivity,
+                        dialogTitle = "Edit Vision Model",
+                        preset = CloudModelConfigDialog.CloudModelInput(
+                            title = profile.title,
+                            apiKey = profile.apiKey,
+                            baseUrl = profile.baseUrl,
+                            modelName = profile.modelName
+                        )
+                    ) { input ->
+                        val updatedProfile = profile.copy(
+                            title = input.title,
+                            apiKey = input.apiKey,
+                            baseUrl = input.baseUrl,
+                            modelName = input.modelName
+                        )
+                        SavedVlmProfilesStore.updateProfile(updatedProfile)
+                        SavedVlmProfilesStore.refreshActiveIfMatching(profile.id)
+                        Toast.makeText(this@VlmConfigActivity, "Config updated.", Toast.LENGTH_SHORT).show()
+                        recreate()
                     }
                 }
             }
-        }
 
-        // Save
-        btnSave.setOnClickListener {
-            val apiKey = etApiKey.text.toString().trim()
-            val baseUrl = etBaseUrl.text.toString().trim()
-            val modelName = etModelName.text.toString().trim()
-
-            if (baseUrl.isEmpty() || modelName.isEmpty()) {
-                Toast.makeText(this, "Base URL and Model Name are required", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
+            val btnDelete = TextView(this).apply {
+                text = "Delete"
+                textSize = 12f
+                setTextColor(getColor(R.color.colorErrorPrimary))
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setOnClickListener {
+                    AlertDialog.showWarm(
+                        context = this@VlmConfigActivity,
+                        title = "Delete Config",
+                        message = "Delete \"${profile.title}\"? This cannot be undone.",
+                        actionTitle = "Delete",
+                        cancelTitle = getString(R.string.common_cancel),
+                        onAction = {
+                            SavedVlmProfilesStore.deleteProfile(profile.id)
+                            recreate()
+                        }
+                    )
+                }
             }
 
-            VlmConfigRepository.save(apiKey, baseUrl, modelName)
-            updateStatusCard(tvStatus, tvStatusMeta, tc, VlmConfigRepository.isConfigured())
-            Toast.makeText(this, "Vision model config saved", Toast.LENGTH_SHORT).show()
-            finish()
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            actions.addView(btnEdit)
+            actions.addView(btnDelete)
+
+            row.addView(selector)
+            row.addView(info)
+            row.addView(actions)
+            card.addView(row)
+            container.addView(card)
+        }
+    }
+
+    private fun buildProfileCardBackground(isActive: Boolean): GradientDrawable {
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(8).toFloat()
+            setColor(
+                getColor(if (isActive) R.color.colorBrandContainer else R.color.colorContainerBrighten)
+            )
+            setStroke(
+                dp(1),
+                getColor(if (isActive) R.color.colorBrandPrimary else R.color.colorBorderBase)
+            )
         }
     }
 
     private fun updateStatusCard(
         tvStatus: TextView,
         tvStatusMeta: TextView,
-        tc: ThemeManager.ChatColors,
         isConfigured: Boolean
     ) {
         if (isConfigured) {
             val config = VlmConfigRepository.load()
             tvStatus.text = config.modelName
-            tvStatusMeta.text = "Configured · ${config.baseUrl}"
+            tvStatusMeta.text = "Enabled · ${config.baseUrl}"
         } else {
             tvStatus.text = "Not configured"
-            tvStatusMeta.text = "Enter API Key, Base URL and Model Name below"
-        }
-    }
-
-    private fun testVlmConnection(apiKey: String, baseUrl: String, modelName: String): String {
-        if (baseUrl.isBlank()) throw IllegalArgumentException("Base URL is required")
-        if (modelName.isBlank()) throw IllegalArgumentException("Model Name is required")
-
-        val client = OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .build()
-
-        try {
-            // Build a minimal vision-compatible request
-            val messages = JSONArray().apply {
-                put(JSONObject().apply {
-                    put("role", "system")
-                    put("content", "You are a test endpoint. Reply briefly.")
-                })
-                put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", "Reply with a short confirmation for this connection test.")
-                })
-            }
-
-            val body = JSONObject().apply {
-                put("model", modelName)
-                put("max_tokens", 50)
-                put("messages", messages)
-            }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-
-            val request = Request.Builder()
-                .url("${baseUrl.trimEnd('/')}/chat/completions")
-                .header("Authorization", "Bearer ${apiKey.ifEmpty { "test" }}")
-                .header("Content-Type", "application/json")
-                .post(body)
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                val responseBody = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    throw RuntimeException("HTTP ${response.code}: ${responseBody.take(200)}")
-                }
-                val root = JSONObject(responseBody)
-                val returnedModel = root.optString("model").takeIf { it.isNotBlank() } ?: modelName
-                val preview = root.optJSONArray("choices")
-                    ?.optJSONObject(0)
-                    ?.optJSONObject("message")
-                    ?.optString("content")
-                    ?.trim()
-                    ?.take(120)
-                    ?: "(empty response)"
-                return "Connected ($returnedModel): $preview"
-            }
-        } finally {
-            client.dispatcher.executorService.shutdown()
-            client.connectionPool.evictAll()
-        }
-    }
-
-    private fun installKeyboardAwareScrolling(scrollView: ScrollView, fields: List<EditText>) {
-        val baseBottomPadding = scrollView.paddingBottom
-        val focusListener = View.OnFocusChangeListener { view, hasFocus ->
-            if (hasFocus) {
-                scrollView.postDelayed({ scrollFieldIntoView(scrollView, view) }, 180)
-            }
-        }
-        fields.forEach { it.onFocusChangeListener = focusListener }
-
-        ViewCompat.setOnApplyWindowInsetsListener(scrollView) { view, insets ->
-            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
-            val systemInsets = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.updatePadding(bottom = baseBottomPadding + max(imeInsets.bottom, systemInsets.bottom))
-            if (imeInsets.bottom > 0) {
-                val focused = currentFocus
-                if (focused is EditText && fields.contains(focused)) {
-                    view.post { scrollFieldIntoView(scrollView, focused) }
-                }
-            }
-            insets
-        }
-        ViewCompat.requestApplyInsets(scrollView)
-    }
-
-    private fun scrollFieldIntoView(scrollView: ScrollView, field: View) {
-        val rect = Rect()
-        field.getDrawingRect(rect)
-        scrollView.offsetDescendantRectToMyCoords(field, rect)
-        val margin = dp(16)
-        val visibleTop = scrollView.scrollY + margin
-        val visibleBottom = scrollView.scrollY + scrollView.height - scrollView.paddingBottom - margin
-        when {
-            rect.top < visibleTop -> scrollView.smoothScrollTo(0, (rect.top - margin).coerceAtLeast(0))
-            rect.bottom > visibleBottom -> {
-                val targetScroll = scrollView.scrollY + (rect.bottom - visibleBottom) + margin
-                scrollView.smoothScrollTo(0, targetScroll.coerceAtLeast(0))
-            }
+            tvStatusMeta.text = "Add a vision model config and enable it"
         }
     }
 

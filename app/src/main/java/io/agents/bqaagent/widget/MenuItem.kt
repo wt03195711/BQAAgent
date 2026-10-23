@@ -27,9 +27,11 @@ class MenuItem @JvmOverloads constructor(
 
     private val ivLeading: ImageView
     private val tvTitle: TextView
+    private val tvSubtitle: TextView
     private val viewRedDot: View
     private val tvTrailing: TextView
     private val ivTrailing: ImageView
+    private val ivInfo: ImageView
     private val divider: View
 
     init {
@@ -38,9 +40,11 @@ class MenuItem @JvmOverloads constructor(
 
         ivLeading = findViewById(R.id.ivLeading)
         tvTitle = findViewById(R.id.tvTitle)
+        tvSubtitle = findViewById(R.id.tvSubtitle)
         viewRedDot = findViewById(R.id.viewRedDot)
         tvTrailing = findViewById(R.id.tvTrailing)
         ivTrailing = findViewById(R.id.ivTrailing)
+        ivInfo = findViewById(R.id.ivInfo)
         divider = findViewById(R.id.divider)
 
         // Show trailing arrow by default
@@ -66,6 +70,19 @@ class MenuItem @JvmOverloads constructor(
      */
     fun setTitle(title: CharSequence) {
         tvTitle.text = title
+    }
+
+    /**
+     * Set subtitle; hides the row when null or blank so item heights stay unchanged
+     * for items without a description.
+     */
+    fun setSubtitle(subtitle: CharSequence?) {
+        tvSubtitle.isVisible = !subtitle.isNullOrEmpty()
+        tvSubtitle.text = subtitle
+    }
+
+    fun setSubtitleColor(color: Int) {
+        tvSubtitle.setTextColor(color)
     }
 
     /**
@@ -135,6 +152,29 @@ class MenuItem @JvmOverloads constructor(
      */
     fun setShowRedDot(show: Boolean) {
         viewRedDot.visibility = if (show) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * Show/hide the inline info button. Hidden by default so rows without a guide stay unchanged.
+     */
+    fun setInfoButtonVisible(visible: Boolean) {
+        ivInfo.isVisible = visible
+    }
+
+    /**
+     * Attach a click handler to the info button. The button consumes its own taps, so this never
+     * fires the row's onClick.
+     */
+    fun setOnInfoClickListener(listener: OnClickListener?) {
+        ivInfo.setOnClickListener(listener)
+    }
+
+    /**
+     * Content description for the info button (set by callers so the generic widget stays
+     * free of feature-specific strings).
+     */
+    fun setInfoButtonContentDescription(description: CharSequence?) {
+        ivInfo.contentDescription = description
     }
 
     /**

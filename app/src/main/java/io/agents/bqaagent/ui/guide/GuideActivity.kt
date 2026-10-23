@@ -37,38 +37,27 @@ class GuideActivity : BaseActivity() {
         ) {
             if (!AppCapabilityCoordinator.isNotificationPermissionGranted(this)) {
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 100)
+                    if (KVUtils.isNotifPermAskedBefore() &&
+                        !shouldShowRequestPermissionRationale(android.Manifest.permission.POST_NOTIFICATIONS)
+                    ) {
+                        // Permanently denied: mirror the Settings pairing gate escape hatch.
+                        Toast.makeText(this, R.string.local_adb_pair_notif_perm_blocked, Toast.LENGTH_LONG).show()
+                        AppCapabilityCoordinator.openAppNotificationSettings(this)
+                    } else {
+                        KVUtils.markNotifPermAsked()
+                        requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 100)
+                    }
                 }
             } else {
                 Toast.makeText(this, R.string.home_notification_enabled, Toast.LENGTH_SHORT).show()
             }
         }
-        bindSection(
-            findViewById(R.id.guideOverlay),
-            R.drawable.ic_window,
-            R.string.guide_title_overlay,
-            R.string.guide_desc_overlay
-        ) {
-            if (!AppCapabilityCoordinator.snapshot(this).overlayGranted) {
-                AppCapabilityCoordinator.openSystemSettings(this, AppRequirement.OVERLAY)
-            }
-        }
-        bindSection(
-            findViewById(R.id.guideBattery),
-            R.drawable.ic_battery,
-            R.string.guide_title_battery,
-            R.string.guide_desc_battery
-        ) {
-            AppCapabilityCoordinator.openSystemSettings(this, AppRequirement.BATTERY_OPTIMIZATION)
-        }
-        bindSection(
-            findViewById(R.id.guideStorage),
-            R.drawable.ic_storage,
-            R.string.guide_title_storage,
-            R.string.guide_desc_storage
-        ) {
-            AppCapabilityCoordinator.openSystemSettings(this, AppRequirement.STORAGE)
-        }
+        // Overlay / Battery / Storage are not pairing prerequisites and the features guide the
+        // user in-context (floating switch, monitor sheet). Keep the folded rows out of the
+        // first-run flow so the guide shows only the two required steps.
+        findViewById<View>(R.id.guideOverlay).visibility = View.GONE
+        findViewById<View>(R.id.guideBattery).visibility = View.GONE
+        findViewById<View>(R.id.guideStorage).visibility = View.GONE
 
         findViewById<View>(R.id.btnStart).setOnClickListener { finishGuide() }
         findViewById<View>(R.id.tvSkip).setOnClickListener { finishGuide() }

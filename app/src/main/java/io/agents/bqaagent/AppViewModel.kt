@@ -3,10 +3,7 @@
 
 package io.agents.bqaagent
 
-import android.os.PowerManager
 import androidx.lifecycle.ViewModel
-import io.agents.bqaagent.ClawApplication.Companion.appViewModelInstance
-import io.agents.bqaagent.TaskEvent
 import io.agents.bqaagent.agent.AgentConfig
 import io.agents.bqaagent.agent.llm.ModelConfigRepository
 import io.agents.bqaagent.channel.Channel
@@ -15,6 +12,7 @@ import io.agents.bqaagent.floating.FloatingCircleManager
 import io.agents.bqaagent.server.ConfigServerManager
 import io.agents.bqaagent.service.KeepAliveJobService
 import io.agents.bqaagent.utils.KVUtils
+import io.agents.bqaagent.utils.ScreenKeepAliveManager
 import io.agents.bqaagent.utils.XLog
 
 class AppViewModel : ViewModel() {
@@ -22,8 +20,6 @@ class AppViewModel : ViewModel() {
     companion object {
         private const val TAG = "AppViewModel"
     }
-
-    private var wakeLock: PowerManager.WakeLock? = null
 
     private var _commonInitialized = false
 
@@ -78,6 +74,10 @@ class AppViewModel : ViewModel() {
         taskOrchestrator.resolveReplayConfirm(confirmed)
     }
 
+    fun resolveSensitiveConfirm(approved: Boolean) {
+        taskOrchestrator.resolveSensitiveConfirm(approved)
+    }
+
     fun init() {
         initCommon()
         initAgent()
@@ -89,7 +89,7 @@ class AppViewModel : ViewModel() {
     }
 
     fun initAgent() {
-        if (!KVUtils.hasLlmConfig()) return
+        if (!ModelConfigRepository.hasUsableModel()) return
         taskOrchestrator.initAgent()
     }
 
@@ -102,48 +102,20 @@ class AppViewModel : ViewModel() {
     fun updateAgentConfig(): Boolean = taskOrchestrator.updateAgentConfig()
 
     fun afterInit() {
-        acquireScreenWakeLock()
+        ScreenKeepAliveManager.acquireCpuOnly(ClawApplication.instance)
         KeepAliveJobService.cancel(ClawApplication.instance)
         ForegroundService.syncToBackgroundState(ClawApplication.instance)
         ConfigServerManager.autoStartIfNeeded(ClawApplication.instance)
     }
 
-
     /**
-     * Acquire a wake lock to prevent the screen from turning off during automation operations.
+     * Prepare the floating window: keep an Application reference and wire the click/stop
+     * callbacks. Visibility is driven purely by the feature toggle — if the toggle is ON we
+     * show the persistent bubble right away; otherwise nothing is displayed.
      */
-    private fun acquireScreenWakeLock() {
-        if (wakeLock?.isHeld == true) return
-        val pm = ClawApplication.instance.getSystemService(android.content.Context.POWER_SERVICE) as? PowerManager
-            ?: return
-        wakeLock = pm.newWakeLock(
-            PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-            "BQAAgent::ScreenWakeLock"
-        ).apply {
-            acquire(10 * 60 * 1000L) // 10 minute timeout to prevent battery drain
-        }
-        XLog.i(TAG, "Wake lock acquired")
-    }
-
-    /**
-     * Release the wake lock
-     */
-    private fun releaseScreenWakeLock() {
-        wakeLock?.let {
-            if (it.isHeld) {
-                it.release()
-                XLog.i(TAG, "Wake lock released")
-            }
-        }
-        wakeLock = null
-    }
-
-    /**
-     * Show the circular floating window
-     */
-    fun showFloatingCircle() {
+    fun setupFloatingCircle() {
         try {
-            FloatingCircleManager.show(ClawApplication.instance)
+            FloatingCircleManager.init(ClawApplication.instance)
             FloatingCircleManager.onFloatClick = {
                 XLog.d(TAG, "Floating circle clicked")
                 bringAppToForeground()
@@ -153,17 +125,28 @@ class AppViewModel : ViewModel() {
                 stopTask()
                 bringAppToForeground()
             }
+            if (KVUtils.isFloatingWindowEnabled()) {
+                FloatingCircleManager.ensureShowing()
+            }
         } catch (e: Exception) {
-            XLog.e(TAG, "Failed to show floating circle: ${e.message}")
+            XLog.e(TAG, "Failed to setup floating circle: ${e.message}")
         }
     }
 
     /**
-     * Bring the app to the foreground
+     * Bring the app to the foreground — routed to the mode the user was last in.
+     * Chat → ComposeChatActivity, Batch → BatchActivity. The same value drives cold-start
+     * UI restoration (KVUtils.getLastUiMode()), so the pill returns you to the right screen.
      */
     private fun bringAppToForeground() {
         val context = ClawApplication.instance
-        val intent = android.content.Intent(context, io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java).apply {
+        val target = when (KVUtils.getLastUiMode()) {
+            io.agents.bqaagent.ui.batch.BatchUiMode.BATCH ->
+                io.agents.bqaagent.ui.batch.BatchActivity::class.java
+            else ->
+                io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java
+        }
+        val intent = android.content.Intent(context, target).apply {
             flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
                     android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
         }

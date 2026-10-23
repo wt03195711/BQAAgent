@@ -4,6 +4,7 @@
 package io.agents.bqaagent.ui.chat
 
 import android.content.Context
+import io.agents.bqaagent.ui.batch.BatchUiMode
 import io.agents.bqaagent.utils.KVUtils
 
 /**
@@ -33,7 +34,10 @@ class ConversationStore(
         private set
 
     fun refreshSidebar(): List<ChatHistoryManager.ConversationSummary> {
-        return ChatHistoryManager.listConversations(context)
+        // Chat and Batch are strictly isolated: only ever surface CHAT conversations here. The
+        // unfiltered listConversations(context) returns both modes and leaked batch rows into the
+        // chat drawer. Batch uses the same filtered overload with BatchUiMode.BATCH.
+        return ChatHistoryManager.listConversations(context, BatchUiMode.CHAT)
     }
 
     fun restoreLastConversation(): SessionSnapshot? {

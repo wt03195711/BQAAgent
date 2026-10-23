@@ -60,6 +60,10 @@ class ClawApplication : BaseApp() {
         Thread({
             try {
                 android.util.Log.e("BQAAGENT_INIT", "app-async-init thread STARTED")
+                // Restore screen_off_timeout if a previous run crashed while an
+                // override was active. Must run BEFORE any new acquire() to avoid
+                // clobbering a legitimately saved original value.
+                io.agents.bqaagent.utils.ScreenKeepAliveManager.restoreIfCrashed()
                 // Repairs recordings orphaned by a killed process and applies retention.
                 // Posts to the recorder's own scheduler and returns immediately.
                 io.agents.bqaagent.recording.TaskRecordingCoordinator.reconcileAsync()
@@ -73,6 +77,10 @@ class ClawApplication : BaseApp() {
                 if (hasConfig) {
                     appViewModelInstance.initAgent()
                     appViewModelInstance.afterInit()
+                    // Prepare the floating window: store the Application reference and register
+                    // the click/stop callbacks, but DO NOT show anything at startup. The window
+                    // is created on-demand by TaskOrchestrator when a task begins.
+                    appViewModelInstance.setupFloatingCircle()
                 }
             } catch (e: Exception) {
                 android.util.Log.e("BQAAGENT_INIT", "app-async-init CRASHED: ${e.message}", e)

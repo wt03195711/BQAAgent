@@ -6,9 +6,7 @@
     <string name="common_cancel">Cancel</string>
     <string name="common_close">Close</string>
     <string name="common_save">Save</string>
-    <string name="common_agree">Agree</string>
     <string name="common_unconfigured">Not configured</string>
-    <string name="common_load_failed">Failed to load: %s</string>
 
     <string name="app_slogan">AI Agents that get things done</string>
 
@@ -21,36 +19,21 @@
     <string name="guide_desc_local_adb">Use Android Wireless debugging directly. Open Wireless debugging, tap Pair device with pairing code, then enter the pairing code.</string>
     <string name="guide_title_notification">Task Notifications</string>
     <string name="guide_desc_notification">Lets BQAAgent show progress while a task or monitor is active. Tap to enable.</string>
-    <string name="guide_title_overlay">System Overlay</string>
-    <string name="guide_desc_overlay">Shows a floating status panel while tasks run. Tap to enable.</string>
-    <string name="guide_title_battery">Battery Whitelist</string>
-    <string name="guide_desc_battery">Prevents the system from killing BQAAgent. Tap to allow.</string>
-    <string name="guide_title_storage">File Access</string>
-    <string name="guide_desc_storage">Lets BQAAgent read and write files on your device. Tap to enable.</string>
 
     <!-- Home -->
-    <string name="home_need_notification_permission">Notification permission is required</string>
     <string name="home_enable_local_adb">Open Wireless debugging, then enter the pairing code</string>
-    <string name="home_local_adb_ready">Local ADB is ready</string>
     <string name="home_notification_enabled">Task notifications enabled</string>
-    <string name="home_overlay_enabled">Overlay permission enabled</string>
     <string name="home_battery_ignored">Battery optimization ignored</string>
     <string name="home_permission_enabled">Enabled</string>
-    <string name="home_card_local_adb_title">Pair with Pairing Code</string>
-    <string name="home_card_local_adb_subtitle">Only the pairing code is needed</string>
-    <string name="home_card_notification_title">Task Notifications</string>
-    <string name="home_card_notification_subtitle">Only while tasks or monitoring are active</string>
-    <string name="home_card_system_window_title">System Window</string>
-    <string name="home_card_system_window_subtitle">Floating panel overlay</string>
-    <string name="home_card_battery_title">Battery Whitelist</string>
-    <string name="home_card_battery_subtitle">Prevent background termination</string>
-    <string name="home_card_storage_title">File Access</string>
-    <string name="home_card_storage_subtitle">Read and write device files</string>
+    <string name="home_card_local_adb_title">Local ADB</string>
+    <string name="home_card_local_adb_subtitle">Required for all automation and recording</string>
+    <string name="home_card_notification_title">Notifications</string>
+    <string name="home_card_notification_subtitle">Pairing codes, task progress and monitor status</string>
+    <string name="home_card_battery_title">Battery optimization</string>
+    <string name="home_card_battery_subtitle">Recommended for long-running tasks</string>
+    <string name="home_card_storage_title">All files access</string>
+    <string name="home_card_storage_subtitle">Android 10 and below only</string>
     <string name="home_storage_enabled">File access permission granted</string>
-    <string name="home_enable_storage">Please allow access to all files</string>
-    <string name="home_cancel_task">Stop current task</string>
-    <string name="home_cancel_task_success">AI task stopped</string>
-    <string name="home_no_task_running">No task is running</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>
@@ -68,11 +51,20 @@
     <string name="sensitive_mode_enabled">Sensitive mode enabled</string>
     <string name="sensitive_mode_disabled">Sensitive mode disabled</string>
     <string name="sensitive_mode_disable_title">Disable Sensitive Mode?</string>
-    <string name="sensitive_mode_disable_message">Disabling sensitive mode removes all safety restrictions for banking and financial app tasks. The agent will no longer block risky operations, enforce credential guards, or limit tool access. Only disable this if you fully understand the risks.</string>
+    <string name="sensitive_mode_disable_message">While Sensitive Mode is ON, the agent pauses before high-risk actions (payments, passwords) and asks you to confirm within 30 seconds. Disabling it lets every action run directly without confirmation. Only disable this if you fully understand the risks.</string>
     <string name="sensitive_mode_disable_confirm">Disable</string>
+    <string name="sensitive_confirm_dialog_title">Sensitive Action Confirmation</string>
+    <string name="sensitive_confirm_dialog_action">Action requesting confirmation</string>
+    <string name="sensitive_confirm_dialog_risk">Risk type</string>
+    <string name="sensitive_confirm_dialog_desc">The agent wants to perform this high-risk action. Confirm to let it continue, or it will be cancelled. The task fails automatically if no decision is made before the countdown ends.</string>
+    <string name="sensitive_confirm_dialog_countdown">Auto-cancel in %1$s</string>
+    <string name="sensitive_confirm_risk_payment">Payment</string>
+    <string name="sensitive_confirm_risk_password">Password / PIN</string>
+    <string name="sensitive_confirm_risk_other">Other</string>
+    <string name="sensitive_confirm_dialog_approve">Confirm</string>
+    <string name="sensitive_confirm_dialog_deny">Cancel</string>
 
     <string name="local_adb_setup_title">Local ADB setup</string>
-    <string name="local_adb_setup_hint">127.0.0.1:connectPort pairPort pairCode</string>
     <string name="local_adb_setup_action">Pair / Connect</string>
     <string name="local_adb_setup_invalid">Enter a valid port</string>
     <string name="local_adb_setup_success">Local ADB connected</string>
@@ -103,18 +95,10 @@
     <string name="local_adb_notification_pairing">Detecting port, pairing, and connecting...</string>
     <string name="local_adb_notification_invalid_input">Enter the 6-digit pairing code only.</string>
     <string name="local_adb_notification_success_text">Paired and connected. Return to BQAAgent to continue testing.</string>
+    <string name="local_adb_guide_content_desc">Local ADB pairing help</string>
+    <string name="local_adb_guide_title">How to pair Local ADB</string>
+    <string name="local_adb_guide_message">Follow these steps once to enable automation:\n\n1. Settings → About phone → tap \"Build number\" 7 times to enable Developer options.\n2. Settings → Developer options → Wireless debugging → turn it on.\n3. Tap \"Pair device with pairing code\". A 6-digit code appears.\n4. Keep that dialog open, return to BQAAgent, and enter the 6-digit code. The port is detected automatically.\n5. Wait for \"Paired and connected\".\n\nNote: You only need the 6-digit code. Do not close the system pairing dialog until it succeeds.</string>
 
-    <!-- LLM Config -->
-    <string name="llm_config_title">LLM Configuration</string>
-    <string name="llm_config_tip">Enter your LLM API key, base URL and model name. Data is stored locally only.</string>
-    <string name="llm_config_api_key">API Key</string>
-    <string name="llm_config_api_key_hint">e.g. sk-xxx (DeepSeek) or your provider key</string>
-    <string name="llm_config_base_url">Base URL</string>
-    <string name="llm_config_base_url_hint">e.g. https://api.deepseek.com (leave empty for DeepSeek default)</string>
-    <string name="llm_config_model_name">Model Name</string>
-    <string name="llm_config_model_name_hint">e.g. deepseek-v4-flash, deepseek-v4-pro</string>
-    <string name="llm_config_saved">LLM configuration saved</string>
-    <string name="llm_config_api_key_required">Please enter API Key</string>
     <string name="menu_llm_config">LLM Config</string>
 
     <!-- Settings Menu -->
@@ -122,14 +106,7 @@
     <string name="lan_config_stopped">Off</string>
     <string name="lan_config_no_wifi">Please connect to WiFi first</string>
 
-    <!-- Protocol -->
-    <string name="protocol_agree_title">Privacy Guidelines</string>
-    <string name="protocol_alert_title">Terms and Privacy</string>
-    <string name="protocol_disagree">Disagree</string>
-    <string name="protocol_agree_continue">Agree and Continue</string>
-
     <!-- Floating -->
-    <string name="floating_ai_label">AI</string>
     <string name="floating_task_received">Received: \"%s\"</string>
 
     <!-- Foreground Service Notification -->
@@ -145,23 +122,11 @@
     <string name="channel_msg_tool_failure">Failed</string>
     <string name="channel_msg_tool_execution">[%1$s]: %2$s</string>
     <string name="channel_msg_task_error">Error: %s</string>
-    <string name="channel_msg_no_local_adb">Local ADB is not connected, cannot execute task</string>
-    <string name="channel_msg_task_in_progress">A task is already running, please wait</string>
     <string name="channel_msg_system_dialog_blocked">A system dialog may be blocking the screen. Please check and handle it manually, then try again.</string>
 
     <!-- Local ADB automation -->
     <string name="cd_back_button">Back</string>
     <string name="cd_settings">Settings</string>
-    <string name="cd_clear_input">Clear input</string>
-    <string name="cd_checkbox">Toggle checkbox</string>
-    <string name="cd_selected">Selected</string>
-    <string name="cd_task_success">Task completed</string>
-    <string name="cd_task_error">Task failed</string>
-    <string name="cd_task_stopped">Task stopped</string>
-    <string name="cd_task_cancelled">Task cancelled</string>
-    <string name="cd_channel_logo">Channel logo</string>
-    <string name="cd_empty_state">No data</string>
-    <string name="cd_error_state">Load failed</string>
 
     <!-- Agent -->
     <string name="agent_local_adb_not_ready">Local ADB is not ready</string>
@@ -211,4 +176,345 @@
     <string name="input_dialog_need_more">Enter at least %d characters</string>
     <string name="input_dialog_need_less">Enter at most %d characters</string>
     <string name="input_dialog_no_zero">Please enter a non-zero value</string>
+    <!-- Batch -->
+    <string name="batch_cd_batch_list">Batch list</string>
+    <string name="batch_tab_chat">Chat</string>
+    <string name="batch_cd_settings">Settings</string>
+    <string name="batch_action_rename">Rename</string>
+    <string name="batch_action_delete">Delete</string>
+    <string name="batch_delete_title">Delete batch?</string>
+    <string name="batch_rename_title">Rename batch</string>
+    <string name="batch_new">New batch</string>
+    <string name="batch_recent">Recent</string>
+    <string name="batch_recent_count">%1$d/%2$d · oldest auto-removed when full</string>
+    <string name="batch_empty_list">No batch runs yet</string>
+    <string name="batch_models">Models</string>
+    <string name="batch_workspace_empty">No tasks yet — tap \"Add task\" below.</string>
+    <string name="batch_workspace_empty_skill">No tasks yet — tap \"Add task\" below, or pick a recorded Skill.</string>
+    <string name="batch_phase_none">None</string>
+    <string name="batch_cd_details">Details</string>
+    <string name="batch_add_task">Add task</string>
+    <string name="batch_task_dialog_title">Task</string>
+    <string name="batch_task_placeholder">Describe the task…</string>
+    <string name="batch_add">Add</string>
+    <string name="batch_from_skill">From Skill</string>
+    <string name="batch_start">Start</string>
+    <string name="batch_precheck_title">Pre-flight check</string>
+    <string name="batch_precheck_checking">Checking device…</string>
+    <string name="batch_precheck_local_adb">Local ADB</string>
+    <string name="batch_precheck_recording">Recording</string>
+    <string name="batch_recording_on">On</string>
+    <string name="batch_recording_on_not_ready">On (device not ready)</string>
+    <string name="batch_precheck_free_space">Free space</string>
+    <string name="batch_recording_off">Off</string>
+    <string name="batch_precheck_blocked">Cannot start — resolve the items above.</string>
+    <string name="batch_precheck_ready_countdown">Ready. Starting in %1$ds…</string>
+    <string name="batch_precheck_warning_prompt">Warnings found — continue anyway?</string>
+    <string name="batch_settings_title">Batch settings</string>
+    <string name="batch_setting_autosave_title">Auto-save / update skills</string>
+    <string name="batch_setting_autosave_subtitle">After an AI run, update the matched skill\'s template</string>
+    <string name="batch_setting_prefer_replay_title">Prefer skill replay</string>
+    <string name="batch_setting_prefer_replay_subtitle">When a matching skill is found, replay it instead of running with AI</string>
+    <string name="batch_setting_reset_title">Reset between tasks</string>
+    <string name="batch_setting_reset_subtitle">Force stop the target application of the previous task before starting the next task</string>
+    <string name="batch_setting_stop_title">Stop on failure</string>
+    <string name="batch_setting_stop_subtitle">Halt the whole batch when a task fails or stops</string>
+    <string name="batch_setting_interval_title">Interval between tasks</string>
+    <string name="batch_setting_interval_subtitle">Idle gap after a task settles (0–30s)</string>
+    <string name="batch_interval_value">%1$ds</string>
+    <string name="batch_progress_completed">%1$d / %2$d completed</string>
+    <string name="batch_phase_pending">Pending</string>
+    <string name="batch_phase_running">Running</string>
+    <string name="batch_phase_skipped_adb">Skipped</string>
+    <string name="batch_phase_timeout">Timed out</string>
+    <string name="batch_phase_abandoned">Abandoned</string>
+    <string name="batch_status_success">Success</string>
+    <string name="batch_status_failed">Failed</string>
+    <string name="batch_status_stopped">Stopped</string>
+    <string name="batch_status_cancelled">Cancelled</string>
+    <string name="batch_status_done">Done</string>
+    <string name="batch_status_reply">Reply</string>
+    <string name="batch_back">Back</string>
+    <string name="batch_detail_empty">No details recorded for this task yet.</string>
+    <string name="batch_detail_task_header">Task %1$d</string>
+    <string name="batch_start_over">Start over</string>
+    <string name="batch_continue">Continue</string>
+    <string name="batch_stopping">Stopping…</string>
+    <string name="batch_rerun_title">Reset existing results?</string>
+    <string name="batch_rerun_message">Some tasks already have results. Starting over clears them and re-runs every task from the first one.</string>
+    <string name="batch_execution_steps">Execution steps</string>
+    <string name="batch_replay_steps">Replay steps</string>
+    <string name="batch_step_running">running</string>
+    <string name="batch_step_duration">Duration %1$s</string>
+    <string name="batch_step_tokens">%1$s tokens</string>
+    <string name="batch_step_intent">Intent: %1$s</string>
+    <string name="batch_step_params">Params: %1$s</string>
+    <string name="batch_view_recording">View recording</string>
+    <string name="batch_result_success">Task succeeded</string>
+    <string name="batch_result_failed">Task failed</string>
+    <string name="batch_result_stopped">Task stopped</string>
+    <string name="batch_result_cancelled">Task cancelled</string>
+    <string name="batch_skill_picker_title">Add from Skill library</string>
+    <string name="batch_skill_picker_empty">No recorded skills yet.</string>
+    <string name="batch_skill_search_hint">Search skills…</string>
+    <string name="batch_skill_search_no_match">No matching skills found.</string>
+    <string name="batch_skill_steps">%1$d steps</string>
+    <string name="batch_skill_no_template">No template</string>
+    <string name="batch_cd_skill_details">Skill details</string>
+    <string name="batch_precheck_block_no_adb">Local ADB is not connected. Enable Wireless debugging and pair BQAAgent first.</string>
+    <string name="batch_precheck_warn_adb_no_answer">Local ADB did not answer the probe. It may reconnect, but tasks could be skipped.</string>
+    <string name="batch_precheck_block_no_task">Add at least one task to run a batch.</string>
+    <string name="batch_precheck_block_no_model">No model is enabled. Enable a local or cloud model in Settings first.</string>
+    <string name="batch_precheck_warn_low_space">Less than the minimum free space for recording. Footage may be dropped.</string>
+    <string name="batch_precheck_warn_near_cap">Recording storage is near the %1$s cap; oldest clips will be pruned.</string>
+    <string name="batch_precheck_warn_skill_near_cap">Auto-save is on: the skill library is at %1$d/%2$d. Worst case all %3$d task(s) in this batch save new skills and exceed the cap, so some may be abandoned.</string>
+    <string name="batch_delete_task_title">Delete this task?</string>
+    <string name="batch_delete_task_message">Task %1$d will be removed from this batch.</string>
+
+    <!-- Chat UI (Stage 1: drawer + top bar + active-task bar) -->
+    <string name="chat_cd_menu">Menu</string>
+    <string name="chat_tab_batch">Batch</string>
+    <string name="chat_action_rename">Rename</string>
+    <string name="chat_action_delete">Delete</string>
+    <string name="chat_delete_title">Delete conversation?</string>
+    <string name="chat_rename_title">Rename conversation</string>
+    <string name="chat_new">New Chat</string>
+    <string name="chat_recent">Recent</string>
+    <string name="chat_recent_count">%1$d/%2$d · oldest auto-removed when full</string>
+    <string name="chat_empty_list">No conversations yet</string>
+    <string name="chat_models">Models</string>
+    <string name="chat_monitoring_one">Monitoring: %1$s</string>
+    <string name="chat_monitoring_many">%1$d monitoring</string>
+    <string name="chat_collapse">Collapse</string>
+    <string name="chat_expand">Expand</string>
+    <string name="chat_stop">Stop</string>
+    <string name="chat_stop_all">Stop All</string>
+
+    <!-- Chat UI (Stage 2: input bar + model switcher) -->
+    <string name="chat_mode_chat">Chat</string>
+    <string name="chat_mode_task">Task</string>
+    <string name="chat_hint_task">Describe a phone task...</string>
+    <string name="chat_hint_unified">Chat or give a task...</string>
+    <string name="chat_hint_chat">Chat with local AI...</string>
+    <string name="chat_cd_send">Send</string>
+    <string name="chat_cd_waiting">Waiting for reply</string>
+    <string name="chat_voice_model_loading">Voice model loading...</string>
+    <string name="chat_voice_recognize_failed">Recognition failed: %1$s</string>
+    <string name="chat_voice_hold_to_talk">Hold to talk</string>
+    <string name="chat_voice_perm_granted">Microphone permission granted. Tap the mic again to use voice input.</string>
+    <string name="chat_voice_perm_denied">Microphone permission denied. Voice input unavailable.</string>
+    <string name="chat_model_none">No model selected</string>
+    <string name="chat_cd_switch_model">Switch model</string>
+    <string name="chat_model_current">Current model</string>
+    <string name="chat_model_phone">Phone model</string>
+    <string name="chat_model_online">Online model</string>
+    <string name="chat_model_usage">Usage</string>
+    <string name="chat_model_phone_group">Phone models</string>
+    <string name="chat_model_on_device">Gemma 4 on device</string>
+    <string name="chat_model_active">Active</string>
+    <string name="chat_model_no_phone">No phone model</string>
+    <string name="chat_model_download_hint">Download Gemma 4 E2B or E4B</string>
+    <string name="chat_model_open">Open</string>
+    <string name="chat_model_online_group">Online models</string>
+    <string name="chat_model_online_setup">Online setup required</string>
+    <string name="chat_model_configure_hint">Configure API key and model</string>
+    <string name="chat_model_manage">Manage models</string>
+
+    <string name="chat_action_copy">Copy</string>
+    <string name="chat_select_text">Select text</string>
+    <string name="chat_copy_all">Copy all</string>
+    <string name="chat_done">Done</string>
+    <string name="chat_copied">Copied</string>
+    <string name="chat_screenshot_required">Screenshot Required</string>
+    <string name="chat_screenshot_required_desc">The current screen is protected. Please take a screenshot and upload it to continue.</string>
+    <string name="chat_skip">Skip</string>
+    <string name="chat_upload">Upload</string>
+    <!-- Batch: user-image upload dialog (screenshot fallback) -->
+    <string name="batch_image_dialog_title">Screenshot needed to continue</string>
+    <string name="batch_image_dialog_task">Current task #%1$d</string>
+    <string name="batch_image_dialog_reason">The automatic screenshot failed (the screen may be protected or the capture command errored), so the AI needs a picture of the current screen to decide the next step.</string>
+    <string name="batch_image_dialog_action">Please upload a screenshot of the target app. If you can\'t, tap Skip and the AI will try to continue without it.</string>
+    <string name="batch_image_dialog_countdown">Auto-skip in %1$s</string>
+    <string name="chat_task_succeeded">Task succeeded</string>
+    <string name="chat_task_failed">Task failed</string>
+    <string name="chat_task_stopped">Task stopped</string>
+    <string name="chat_task_cancelled">Task cancelled</string>
+    <string name="chat_view_recording">View recording</string>
+    <string name="chat_execution_steps">Execution steps</string>
+    <string name="chat_downloading_title">Downloading your AI brain</string>
+    <string name="chat_downloading_subtitle">This only happens once</string>
+    <string name="chat_empty_subtitle">Chat or run tasks. Just type what you need.</string>
+
+    <string name="chat_workflows_title">Workflows</string>
+    <string name="chat_workflows_subtitle">Background tasks powered by AI — things a single prompt can\'t do.</string>
+    <string name="chat_workflows_experimental">Experimental — more workflows coming soon</string>
+    <string name="chat_skill_monitor_title">Monitor Messages</string>
+    <string name="chat_skill_monitor_desc">Auto-reply to someone\'s messages in background</string>
+    <string name="chat_skill_send_title">Send Message</string>
+    <string name="chat_skill_send_desc">Send a message to someone via any messaging app</string>
+    <string name="chat_running_in_background">Running in background</string>
+    <string name="chat_monitor_dialog_title">Monitor &amp; Auto-Reply</string>
+    <string name="chat_monitor_target">Target</string>
+    <string name="chat_monitor_target_hint">e.g. Mom, +1 555 123 4567</string>
+    <string name="chat_monitor_app">App</string>
+    <string name="chat_monitor_tone">Tone</string>
+    <string name="chat_monitor_start">Start Monitoring</string>
+    <string name="chat_send_hint_prefix">With a smarter LLM, you can just type:</string>
+    <string name="chat_send_hint_example">\"send hi to Mom on WhatsApp\"</string>
+    <string name="chat_send_word_send">"Send "</string>
+    <string name="chat_send_word_to">"to "</string>
+    <string name="chat_send_word_on">" on "</string>
+    <string name="chat_send_ph_message">message</string>
+    <string name="chat_send_ph_name">name</string>
+    <string name="chat_action_send">Send</string>
+
+    <!-- Chat: image picker toasts (Phase 5) -->
+    <string name="chat_image_invalid_type">⚠️ Please select an image file (PNG, JPEG, WebP).</string>
+    <string name="chat_image_too_large">⚠️ Image too large (%1$dMB). Maximum is 20MB.</string>
+    <string name="chat_image_too_small">⚠️ Image too small. Please upload a full-screen screenshot.</string>
+    <string name="chat_image_upload_soon">Image upload coming soon</string>
+
+    <!-- OCR: image-to-task extraction -->
+    <string name="ocr_cd_button">Extract text from image</string>
+    <string name="ocr_choose_source">Choose image source</string>
+    <string name="ocr_choose_camera">Take photo</string>
+    <string name="ocr_choose_gallery">Choose from gallery</string>
+    <string name="ocr_camera_perm_denied">Camera permission denied. Cannot take photos.</string>
+    <string name="ocr_camera_failed">Failed to open camera</string>
+    <string name="ocr_storage_unavailable">Storage unavailable</string>
+    <string name="ocr_image_error">Failed to extract text from image</string>
+    <string name="ocr_error_blurry">Image is blurry, unable to recognize text</string>
+    <string name="ocr_error_no_task">No valid task description found in image</string>
+    <string name="ocr_vlm_not_configured">Vision model not configured. Set it up in Settings first.</string>
+    <string name="ocr_recognizing">Recognizing task info…</string>
+    <string name="ocr_recognizing_hint">Please wait, do not leave this screen</string>
+
+    <!-- Skill save / replay overlay (Phase 5) -->
+    <string name="skill_save_update_template_title">Update template?</string>
+    <string name="skill_save_learn_template_title">Learn new template?</string>
+    <string name="skill_save_update_template_desc">This task re-ran skill \"%1$s\" with the AI agent. Review the recorded steps and save them to update its execution template.</string>
+    <string name="skill_save_match_template_desc">This task matched the existing skill \"%1$s\". Review the recorded steps and save them as a new execution template for it.</string>
+    <string name="skill_save_offer_title">Save as Skill?</string>
+    <string name="skill_save_offer_desc">This task was completed by the AI agent. Save it as a reusable Skill so it can run faster next time.</string>
+    <string name="skill_save_task_label">Task: %1$s</string>
+    <string name="skill_save_not_now">Not now</string>
+    <string name="skill_save_review_template">Review Template</string>
+    <string name="skill_save_as_skill">Save as Skill</string>
+    <string name="skill_save_confirm_template_title">Confirm Template</string>
+    <string name="skill_save_confirm_skill_title">Confirm Skill</string>
+    <string name="skill_save_title_label">Skill title (editable)</string>
+    <string name="skill_save_steps_review">Steps (%1$d) · review before save</string>
+    <string name="skill_save_confirm_save_template">Confirm &amp; Save Template</string>
+    <string name="skill_save_confirm_save_skill">Confirm &amp; Save Skill</string>
+    <string name="skill_save_same_as_above">(same as above)</string>
+    <string name="skill_save_chip_new_template">New Template</string>
+    <string name="skill_save_chip_new_skill">New Skill</string>
+    <string name="skill_save_saving_template">Saving Template...</string>
+    <string name="skill_save_saving_skill">Saving Skill...</string>
+    <string name="skill_save_success_template">✅ Template saved</string>
+    <string name="skill_save_success_skill">✅ Skill saved</string>
+    <string name="skill_save_success_template_desc">New template added to \"%1$s\"</string>
+    <string name="skill_save_success_skill_desc">Saved as: %1$s</string>
+    <string name="skill_save_fail_title">❌ Save failed</string>
+    <string name="skill_save_retry">Retry</string>
+    <string name="skill_limit_title">🗂️ Skill limit reached</string>
+    <string name="skill_limit_message">You\'ve saved %1$d of %2$d Skills — the limit is reached, so this task can\'t be saved as a new Skill yet.\n\nDelete a Skill you no longer need in Skill Management, then come back and tap Save again.</string>
+    <string name="skill_limit_open_management">Open Skill Management</string>
+    <string name="skill_manager_summary">%1$d of %2$d Skills saved\nWhen the limit is reached, new tasks can no longer be saved as Skills.</string>
+    <string name="skill_manager_warning">Skill library almost full — %1$d of %2$d used. Once the limit is reached, new tasks can no longer be saved as Skills. Consider deleting Skills you no longer need.</string>
+    <string name="skill_replay_confirm_title">Confirm Replay</string>
+    <string name="skill_replay_steps_recorded">Steps (%1$d) · recorded template</string>
+    <string name="skill_replay_steps_substituted">Steps (%1$d) · values in red are replaced for this run</string>
+    <string name="skill_replay_use_ai">Use AI Instead</string>
+    <string name="skill_replay_confirm_button">Confirm &amp; Replay</string>
+    <string name="skill_replay_chip">Replay</string>
+    <string name="skill_replay_task_description">Task description</string>
+    <string name="common_back">Back</string>
+
+    <!-- Settings: Permissions group -->
+    <string name="settings_group_permissions">Permissions</string>
+    <string name="settings_perm_notif_access_title">Notification Access</string>
+    <string name="settings_perm_notif_access_subtitle">Only needed for message monitoring</string>
+    <string name="settings_perm_advanced_title">Advanced</string>
+    <string name="settings_perm_summary_to_enable">%1$d to enable</string>
+    <string name="settings_perm_summary_recommended">%1$d recommended</string>
+    <string name="settings_perm_summary_all_set">All set ✓</string>
+    <string name="perm_status_ready">Ready</string>
+    <string name="perm_status_not_ready">Not ready</string>
+    <string name="perm_status_connecting">Connecting</string>
+    <string name="perm_status_connected">Connected</string>
+    <string name="perm_status_disconnected">Disconnected</string>
+    <string name="perm_status_allowed">Allowed</string>
+    <string name="perm_status_not_allowed">Not allowed</string>
+    <string name="perm_status_disabled">Off</string>
+    <string name="perm_status_unrestricted">Unrestricted</string>
+    <string name="perm_status_restricted">Restricted</string>
+    <string name="perm_status_not_needed">Not needed</string>
+
+    <!-- Monitor permission guide sheet -->
+    <string name="monitor_unknown_target">Could not figure out who to monitor. Try: \"Monitor Mom on WhatsApp\"</string>
+    <string name="monitor_setting_up">Setting up auto-reply for %1$s on %2$s…</string>
+    <string name="monitor_active">Auto-reply is now active for %1$s.\nMonitoring in background. You can stop anytime from the bar above.</string>
+    <string name="monitor_guide_title">Set up monitoring</string>
+    <string name="monitor_guide_subtitle">Finish these steps to let BQAAgent auto-reply to %1$s</string>
+    <string name="monitor_guide_row_adb_title">Local ADB</string>
+    <string name="monitor_guide_row_adb_desc">Required — sends replies on this device</string>
+    <string name="monitor_guide_row_notif_access_desc">Required — reads incoming messages to trigger replies</string>
+    <string name="monitor_guide_row_notif_perm_title">Notifications</string>
+    <string name="monitor_guide_row_notif_perm_desc">Required — keeps the monitor service alive</string>
+    <string name="monitor_guide_row_battery_title">Battery optimization</string>
+    <string name="monitor_guide_row_battery_desc">Optional — improves background stability</string>
+    <string name="monitor_guide_action_setup">Set up</string>
+    <string name="monitor_guide_action_allow">Allow</string>
+    <string name="monitor_guide_optional">Optional</string>
+    <string name="monitor_guide_waiting">Waiting for permissions… monitoring starts automatically once everything is ready</string>
+    <string name="monitor_guide_start">Start monitoring</string>
+
+    <!-- Settings: floating window & overlay unification -->
+    <string name="settings_perm_overlay_title">Display over other apps</string>
+    <string name="settings_perm_overlay_subtitle">Lets BQAAgent draw on top of other apps</string>
+    <string name="settings_floating_window_subtitle">Show a status ball while tasks are running</string>
+    <string name="settings_floating_window_title">Floating Window</string>
+    <string name="settings_state_enabled">Enabled</string>
+    <string name="settings_state_disabled">Disabled</string>
+    <string name="settings_floating_window_no_overlay">Enabled · permission missing</string>
+    <string name="settings_floating_window_enabled_toast">Floating window enabled</string>
+    <string name="settings_floating_window_disabled_toast">Floating window disabled</string>
+    <string name="settings_floating_window_overlay_hint">Floating window is on — grant \"Display over other apps\" to show it</string>
+    <string name="settings_perm_overlay_needed_by_floating">Needed by the Floating Window switch</string>
+    <string name="settings_perm_overlay_already_granted">Permission already granted</string>
+
+    <!-- Chat: capability banner -->
+    <string name="chat_banner_adb_disconnected">Local ADB disconnected — tap to fix</string>
+    <string name="chat_banner_adb_not_ready">Local ADB not ready — tap to set up</string>
+
+    <!-- P4: pairing notification gate & guide -->
+    <string name="local_adb_pair_notif_perm_blocked">Notifications are blocked for BQAAgent — allow them to receive the pairing code</string>
+    <string name="guide_more_hint">Overlay, battery and file-access permissions are not required up front — each feature asks for them when it\'s actually needed (Settings → Advanced).</string>
+
+    <!-- Settings: i18n cleanup -->
+    <string name="settings_group_general">General</string>
+    <string name="settings_vision_model_title">Vision Model</string>
+    <string name="settings_voice_input_title">Voice Input</string>
+    <string name="settings_group_skill_management">Skill Management</string>
+    <string name="settings_skill_capture_mode_title">Skill Capture Mode</string>
+    <string name="settings_skill_data_title">Skill Data</string>
+    <string name="settings_skill_data_count">%1$d/%2$d saved</string>
+    <string name="settings_task_recording_title">Task Recording</string>
+    <string name="settings_task_recording_enable_title">Enable Recording</string>
+    <string name="settings_recorded_files_title">Recorded Files</string>
+    <string name="settings_task_recording_adb_off">Enabled · ADB off</string>
+    <string name="settings_task_recording_issue">Enabled · issue</string>
+    <string name="settings_recordings_files_count">%1$d file(s)</string>
+    <string name="settings_recording_disabled_toast">Task Recording disabled</string>
+    <string name="settings_recording_adb_required_title">Local ADB required</string>
+    <string name="settings_recording_adb_required_message">Task recording runs over the same Local ADB channel as automation.\n\nConnect Local ADB first (Permissions → Local ADB), then enable recording.</string>
+    <string name="settings_recording_checking_toast">Already checking this device</string>
+    <string name="settings_recording_stop_task_toast">Stop the running task first</string>
+    <string name="settings_skill_capture_on_title">Skill Capture Mode enabled</string>
+    <string name="settings_skill_capture_on_message">Tasks now run independently without chat history, and completed tasks can be recorded and saved as reusable skills.\n\nNote: please describe the complete task in one message, since follow-up replies will not continue the previous task.</string>
+    <string name="settings_skill_capture_off_toast">Skill Capture Mode off: tasks follow chat history again, skill saving disabled</string>
+    <string name="common_got_it">Got it</string>
+    <string name="settings_sensitive_mode_subtitle">Confirm before tasks touch payments or passwords</string>
+
 </resources>

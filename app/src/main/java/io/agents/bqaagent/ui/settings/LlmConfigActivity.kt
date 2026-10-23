@@ -3,50 +3,40 @@
 
 package io.agents.bqaagent.ui.settings
 
-import dev.langchain4j.data.message.UserMessage
-import android.graphics.Color
-import android.graphics.Rect
-import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.graphics.drawable.GradientDrawable
+import android.widget.FrameLayout
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
-import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.RadioButton
-import android.widget.RadioGroup
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.cardview.widget.CardView
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.updatePadding
 import io.agents.bqaagent.ClawApplication
 import io.agents.bqaagent.R
-import io.agents.bqaagent.agent.AgentConfig
 import io.agents.bqaagent.agent.CloudProvider
-import io.agents.bqaagent.agent.CustomCloudDefaults
-import io.agents.bqaagent.agent.LlmProvider
 import io.agents.bqaagent.agent.llm.ActiveModelMode
-import io.agents.bqaagent.agent.llm.LlmClientFactory
 import io.agents.bqaagent.agent.llm.LocalModelManager
 import io.agents.bqaagent.agent.llm.ModelConfigRepository
+import io.agents.bqaagent.agent.llm.SavedLlmProfilesStore
+import io.agents.bqaagent.agent.llm.SavedModelProfile
+import io.agents.bqaagent.agent.llm.SavedProfileLimits
 import io.agents.bqaagent.base.BaseActivity
 import io.agents.bqaagent.ui.chat.ThemeManager
 import io.agents.bqaagent.utils.KVUtils
+import io.agents.bqaagent.widget.AlertDialog
+import io.agents.bqaagent.widget.CloudModelConfigDialog
 import io.agents.bqaagent.widget.CommonToolbar
 import io.agents.bqaagent.widget.KButton
 import java.util.concurrent.Executors
-import kotlin.math.max
 
 class LlmConfigActivity : BaseActivity() {
 
     private val executor = Executors.newSingleThreadExecutor()
     private var isDownloading = false
-    private var selectedProvider: CloudProvider = CloudProvider.DEEPSEEK
-    private var selectedModelId: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,7 +70,13 @@ class LlmConfigActivity : BaseActivity() {
         val defaultCloudMeta = findViewById<TextView>(R.id.tvDefaultCloudMeta)
         val defaultCloudStatus = findViewById<TextView>(R.id.tvDefaultCloudStatus)
         val modelList = findViewById<LinearLayout>(R.id.layoutModelList)
+        // Migrate legacy cloud config to a saved profile BEFORE rendering, so the
+        // "enabled profile" gate below reflects the true state even on first launch.
+        SavedLlmProfilesStore.migrateFromCurrentIfNeeded()
         val resolvedConfig = ModelConfigRepository.snapshot()
+        val activeProfileId = SavedLlmProfilesStore.getActiveProfileId()
+        val hasEnabledProfile = activeProfileId.isNotBlank() &&
+                SavedLlmProfilesStore.listProfiles().any { it.id == activeProfileId }
         val deviceSupport = LocalModelManager.deviceSupport(this)
         val catalog = LocalModelManager.catalog(this).associateBy { it.model.id }
 
@@ -120,7 +116,7 @@ class LlmConfigActivity : BaseActivity() {
                 }
             )
         } else {
-            val cloudModel = resolvedConfig.activeCloud.modelName
+            val cloudModel = if (hasEnabledProfile) resolvedConfig.activeCloud.modelName else ""
             if (cloudModel.isNotEmpty()) {
                 activeModelName.text = cloudModel
                 val providerName = resolvedConfig.activeCloud.provider.displayName
@@ -146,14 +142,14 @@ class LlmConfigActivity : BaseActivity() {
             }
         )
 
-        if (resolvedConfig.defaultCloud.isConfigured) {
+        if (hasEnabledProfile && resolvedConfig.defaultCloud.isConfigured) {
             defaultCloudName.text = resolvedConfig.defaultCloud.modelName
             defaultCloudMeta.text = "${resolvedConfig.defaultCloud.provider.displayName} · Cloud"
             defaultCloudStatus.text = "Ready"
             defaultCloudStatus.setTextColor(tc.toolDefault)
         } else {
             defaultCloudName.text = "No default cloud model"
-            defaultCloudMeta.text = "Configure a cloud model below"
+            defaultCloudMeta.text = "Add a cloud model and enable it"
             defaultCloudStatus.text = "Not configured"
             defaultCloudStatus.setTextColor(tc.toolDefault)
         }
@@ -347,8 +343,11 @@ class LlmConfigActivity : BaseActivity() {
         // Storage info
         updateStorageInfo()
 
-        // Cloud LLM — Provider tabs + model cards
+        // Cloud LLM — add button opens the shared dialog
         setupCloudLlm(tc)
+
+        // Saved profiles rendering
+        setupSavedProfiles(tc)
     }
 
     private fun updateStorageInfo() {
@@ -371,366 +370,190 @@ class LlmConfigActivity : BaseActivity() {
     }
 
     private fun setupCloudLlm(tc: ThemeManager.ChatColors) {
-        val tabLayout = findViewById<LinearLayout>(R.id.layoutProviderTabs)
-        val modelListLayout = findViewById<LinearLayout>(R.id.layoutCloudModels)
-        val layoutBaseUrl = findViewById<View>(R.id.layoutBaseUrl)
-        val tvCustomHint = findViewById<TextView>(R.id.tvCustomHint)
-        val etApiKey = findViewById<EditText>(R.id.etApiKey)
-        val etBaseUrl = findViewById<EditText>(R.id.etBaseUrl)
-        val etModelName = findViewById<EditText>(R.id.etModelName)
-        val tvStatus = findViewById<TextView>(R.id.tvConnectionStatus)
-        val btnTest = findViewById<TextView>(R.id.btnTestConnection)
-        val btnSave = findViewById<KButton>(R.id.btnSaveCloud)
-        val btnClear = findViewById<TextView>(R.id.btnClearApiKey)
-        val scrollView = findViewById<ScrollView>(R.id.scrollContent)
-        val configSnapshot = ModelConfigRepository.snapshot()
-        val cloudSeed = configSnapshot.defaultCloud.let {
-            if (it.modelName.isNotEmpty() || it.apiKey.isNotEmpty() || it.baseUrl.isNotEmpty()) it else configSnapshot.activeCloud
-        }
-        val customDefaults = CustomCloudDefaults.current(this)
-        fun customSeedModel(): String =
-            if (cloudSeed.provider == CloudProvider.CUSTOM) {
-                cloudSeed.modelName.ifBlank { customDefaults.modelName }
-            } else {
-                customDefaults.modelName
+        val btnAdd = findViewById<KButton>(R.id.btnAddNewProfile)
+        btnAdd.setOnClickListener {
+            if (SavedLlmProfilesStore.listProfiles().size >= SavedProfileLimits.MAX_LLM_PROFILES) {
+                Toast.makeText(this, "Max ${SavedProfileLimits.MAX_LLM_PROFILES} configs allowed. Delete one first.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
             }
-        fun customSeedBaseUrl(): String =
-            if (cloudSeed.provider == CloudProvider.CUSTOM) {
-                cloudSeed.baseUrl.ifBlank { customDefaults.baseUrl }
-            } else {
-                customDefaults.baseUrl
-            }
-        fun seedApiKey(provider: CloudProvider): String {
-            val savedKey = KVUtils.getApiKeyForProvider(provider.name)
-            if (savedKey.isNotBlank()) return savedKey
-            if (provider == cloudSeed.provider && cloudSeed.apiKey.isNotBlank()) return cloudSeed.apiKey
-            return if (provider == CloudProvider.CUSTOM) customDefaults.apiKey else ""
-        }
-
-        installKeyboardAwareScrolling(scrollView, listOf(etApiKey, etBaseUrl, etModelName))
-
-        // Clear API key button
-        btnClear.setOnClickListener {
-            etApiKey.setText("")
-            KVUtils.setApiKeyForProvider(selectedProvider.name, "")
-            KVUtils.setLlmApiKey("")
-            Toast.makeText(this, "API key cleared", Toast.LENGTH_SHORT).show()
-        }
-
-        // Determine current provider from saved config
-        selectedProvider = CloudProvider.fromName(cloudSeed.providerName)
-        selectedModelId = if (selectedProvider == CloudProvider.CUSTOM) customSeedModel() else cloudSeed.modelName
-        etApiKey.setText(seedApiKey(selectedProvider))
-
-        // Build provider tabs
-        val tabViews = mutableMapOf<CloudProvider, TextView>()
-        CloudProvider.entries.forEach { provider ->
-            val tab = TextView(this).apply {
-                text = provider.displayName
-                textSize = 13f
-                setPadding(dp(14), dp(6), dp(14), dp(6))
-                gravity = Gravity.CENTER
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.MATCH_PARENT
+            CloudModelConfigDialog.show(
+                context = this,
+                dialogTitle = "Add Cloud Model",
+                preset = null
+            ) { input ->
+                val profile = SavedModelProfile(
+                    id = SavedLlmProfilesStore.generateId(),
+                    title = input.title,
+                    providerName = CloudProvider.CUSTOM.name,
+                    modelName = input.modelName,
+                    baseUrl = input.baseUrl,
+                    apiKey = input.apiKey
                 )
-                // Click handler set below after renderModels is defined
-            }
-            tabViews[provider] = tab
-            tabLayout.addView(tab)
-        }
-
-        fun updateTabStyles() {
-            tabViews.forEach { (provider, tab) ->
-                if (provider == selectedProvider) {
-                    tab.setTextColor(Color.WHITE)
-                    tab.background = GradientDrawable().apply {
-                        cornerRadius = dp(4).toFloat()
-                        setColor(getColor(R.color.colorBrandPrimary))
-                    }
-                } else {
-                    tab.setTextColor(tc.toolDefault)
-                    tab.background = null
-                }
-            }
-        }
-        updateTabStyles()
-
-        // Render model cards for current provider
-        fun renderModels() {
-            modelListLayout.removeAllViews()
-            val isCustom = selectedProvider == CloudProvider.CUSTOM
-            layoutBaseUrl.visibility = if (isCustom) View.VISIBLE else View.GONE
-            tvCustomHint?.visibility = if (isCustom) View.VISIBLE else View.GONE
-
-            if (isCustom) {
-                etBaseUrl.setText(customSeedBaseUrl())
-                etModelName.setText(selectedModelId.ifBlank { customDefaults.modelName })
-                return
-            }
-
-            selectedProvider.models.forEach { model ->
-                val isSelected = model.id == selectedModelId
-                val card = CardView(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply { bottomMargin = dp(6) }
-                    radius = 0f
-                    cardElevation = dp(1).toFloat()
-                    setCardBackgroundColor(if (isSelected) getColor(R.color.colorBrandContainer) else tc.toolbarBg)
-                    if (isSelected) {
-                        setContentPadding(dp(2), dp(2), dp(2), dp(2))
-                    }
-                    setOnClickListener {
-                        selectedModelId = model.id
-                        renderModels()
-                    }
-                }
-
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(14), dp(12), dp(14), dp(12))
-                }
-
-                // Model info
-                val info = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                }
-                val nameRow = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                }
-                nameRow.addView(TextView(this).apply {
-                    text = model.displayName
-                    textSize = 14f
-                    setTextColor(tc.aiText)
-                    if (isSelected) setTypeface(typeface, android.graphics.Typeface.BOLD)
-                })
-                // Recommended badge
-                if (model.recommended) {
-                    nameRow.addView(TextView(this).apply {
-                        text = " Recommended"
-                        textSize = 12f
-                        setTextColor(tc.toolDefault)
-                    })
-                }
-                info.addView(nameRow)
-
-                // Price + tier
-                info.addView(TextView(this).apply {
-                    text = "${model.tier.label} · \$${model.inputPricePerM} / \$${model.outputPricePerM} per 1M"
-                    textSize = 11f
-                    setTextColor(tc.toolDefault)
-                })
-                row.addView(info)
-
-                card.addView(row)
-                modelListLayout.addView(card)
-            }
-        }
-        renderModels()
-
-        // Provider tab switch — load per-provider saved API key
-        fun switchProvider(provider: CloudProvider, colors: ThemeManager.ChatColors) {
-            selectedProvider = provider
-            selectedModelId = when {
-                provider == CloudProvider.CUSTOM -> customSeedModel()
-                provider == cloudSeed.provider && provider.models.any { it.id == cloudSeed.modelName } -> cloudSeed.modelName
-                else -> provider.models.firstOrNull()?.id ?: ""
-            }
-            updateTabStyles()
-            renderModels()
-            tvStatus.visibility = View.GONE
-            etApiKey.setText(seedApiKey(provider))
-        }
-        // Re-assign click listeners with the inner function
-        tabViews.forEach { (provider, tab) ->
-            tab.setOnClickListener { switchProvider(provider, tc) }
-        }
-
-        // Test Connection
-        btnTest.setOnClickListener {
-            val provider = selectedProvider
-            val apiKey = etApiKey.text.toString().trim()
-            val baseUrl = if (provider == CloudProvider.CUSTOM) etBaseUrl.text.toString().trim()
-                else provider.defaultBaseUrl
-            val modelId = if (provider == CloudProvider.CUSTOM) etModelName.text.toString().trim()
-                else selectedModelId
-
-            tvStatus.visibility = View.VISIBLE
-            tvStatus.text = "Testing real request..."
-            tvStatus.setTextColor(tc.toolDefault)
-            btnTest.isEnabled = false
-            btnTest.alpha = 0.6f
-
-            executor.submit {
-                try {
-                    val result = runCloudConnectionTest(
-                        provider = provider,
-                        apiKey = apiKey,
-                        baseUrl = baseUrl,
-                        modelId = modelId
-                    )
-                    runOnUiThread {
-                        tvStatus.text = result
-                        tvStatus.setTextColor(tc.toolDefault)
-                        btnTest.text = "Test"
-                        btnTest.isEnabled = true
-                        btnTest.alpha = 1f
-                    }
-                } catch (t: Throwable) {
-                    runOnUiThread {
-                        tvStatus.text = "Real request failed: ${t.readableMessage()}"
-                        tvStatus.setTextColor(getColor(R.color.colorErrorPrimary))
-                        btnTest.text = "Test"
-                        btnTest.isEnabled = true
-                        btnTest.alpha = 1f
-                    }
-                }
-            }
-        }
-
-        // Save & Activate
-        btnSave.setOnClickListener {
-            val apiKey = etApiKey.text.toString().trim()
-            val isCustom = selectedProvider == CloudProvider.CUSTOM
-            if (!isCustom && apiKey.isEmpty()) {
-                Toast.makeText(this, "Enter API Key", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-
-            val baseUrl = if (isCustom) etBaseUrl.text.toString().trim() else selectedProvider.defaultBaseUrl
-            val modelId = if (isCustom) etModelName.text.toString().trim() else selectedModelId
-
-            if (modelId.isEmpty()) {
-                Toast.makeText(this, "Select a model", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-
-            // Save as default cloud model (independent of local config)
-            ModelConfigRepository.saveCloudDefault(
-                providerName = selectedProvider.name,
-                modelId = modelId,
-                baseUrl = baseUrl,
-                apiKey = apiKey,
-                activateNow = !ModelConfigRepository.isLocalActive()
-            )
-            ClawApplication.appViewModelInstance.updateAgentConfig()
-            ClawApplication.appViewModelInstance.initAgent()
-            ClawApplication.appViewModelInstance.afterInit()
-            Toast.makeText(this, "Saved cloud default: $modelId", Toast.LENGTH_SHORT).show()
-            finish()
-        }
-
-        // Active model card is already set in onCreate based on actual provider
-    }
-
-    private fun runCloudConnectionTest(
-        provider: CloudProvider,
-        apiKey: String,
-        baseUrl: String,
-        modelId: String,
-    ): String {
-        if (modelId.isBlank()) {
-            throw IllegalArgumentException("Select or enter a model first")
-        }
-        if (provider != CloudProvider.CUSTOM && apiKey.isBlank()) {
-            throw IllegalArgumentException("Enter API Key")
-        }
-        if (provider == CloudProvider.CUSTOM && baseUrl.isBlank()) {
-            throw IllegalArgumentException("Enter Base URL for Custom provider")
-        }
-
-        val client = LlmClientFactory.create(
-            AgentConfig(
-                apiKey = apiKey,
-                baseUrl = baseUrl,
-                modelName = modelId,
-                maxIterations = 1,
-                temperature = 0.0,
-                provider = LlmProvider.OPENAI,
-                streaming = false
-            )
-        )
-        return try {
-            val response = client.chat(
-                messages = listOf(UserMessage.from("Reply with a short confirmation for this connection test.")),
-                toolSpecs = emptyList()
-            )
-            val returnedModel = response.modelName?.takeIf { it.isNotBlank() } ?: modelId
-            val preview = response.text
-                .orEmpty()
-                .replace(Regex("\\s+"), " ")
-                .trim()
-                .ifBlank { "(empty response)" }
-                .take(160)
-            "Real request succeeded ($returnedModel): $preview"
-        } finally {
-            client.close()
-        }
-    }
-
-    private fun Throwable.readableMessage(): String {
-        return message?.takeIf { it.isNotBlank() }
-            ?: cause?.message?.takeIf { it.isNotBlank() }
-            ?: javaClass.simpleName
-    }
-
-    /**
-     * Keep focused fields visible above the IME on edge-to-edge layouts.
-     * `adjustResize` alone is not reliable here because the ScrollView content
-     * still needs extra bottom inset + explicit scroll after the keyboard opens.
-     */
-    private fun installKeyboardAwareScrolling(scrollView: ScrollView, fields: List<EditText>) {
-        val baseBottomPadding = scrollView.paddingBottom
-
-        val focusListener = View.OnFocusChangeListener { view, hasFocus ->
-            if (hasFocus) {
-                scrollView.postDelayed({ scrollFieldIntoView(scrollView, view) }, 180)
-            }
-        }
-        fields.forEach { it.onFocusChangeListener = focusListener }
-
-        ViewCompat.setOnApplyWindowInsetsListener(scrollView) { view, insets ->
-            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
-            val systemInsets = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.updatePadding(bottom = baseBottomPadding + max(imeInsets.bottom, systemInsets.bottom))
-
-            if (imeInsets.bottom > 0) {
-                val focused = currentFocus
-                if (focused is EditText && fields.contains(focused)) {
-                    view.post { scrollFieldIntoView(scrollView, focused) }
-                }
-            }
-            insets
-        }
-        ViewCompat.requestApplyInsets(scrollView)
-    }
-
-    private fun scrollFieldIntoView(scrollView: ScrollView, field: View) {
-        val rect = Rect()
-        field.getDrawingRect(rect)
-        scrollView.offsetDescendantRectToMyCoords(field, rect)
-
-        val margin = dp(16)
-        val visibleTop = scrollView.scrollY + margin
-        val visibleBottom = scrollView.scrollY + scrollView.height - scrollView.paddingBottom - margin
-
-        when {
-            rect.top < visibleTop -> {
-                scrollView.smoothScrollTo(0, (rect.top - margin).coerceAtLeast(0))
-            }
-            rect.bottom > visibleBottom -> {
-                val targetScroll = scrollView.scrollY + (rect.bottom - visibleBottom) + margin
-                scrollView.smoothScrollTo(0, targetScroll.coerceAtLeast(0))
+                SavedLlmProfilesStore.saveProfile(profile)
+                Toast.makeText(this, "Config saved. Tap Enable to use it.", Toast.LENGTH_SHORT).show()
+                recreate()
             }
         }
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun setupSavedProfiles(tc: ThemeManager.ChatColors) {
+        val container = findViewById<LinearLayout>(R.id.layoutSavedProfiles)
+        container.removeAllViews()
+        val profiles = SavedLlmProfilesStore.listProfiles()
+        val activeId = SavedLlmProfilesStore.getActiveProfileId()
+
+        profiles.forEach { profile ->
+            val isActive = profile.id == activeId
+            val card = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(8) }
+                background = buildProfileCardBackground(isActive)
+            }
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+            }
+
+            val info = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+            val titleRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            titleRow.addView(TextView(this).apply {
+                text = profile.title
+                textSize = 14f
+                setTextColor(tc.aiText)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+            })
+            info.addView(titleRow)
+            info.addView(TextView(this).apply {
+                text = "${profile.modelName} · ${profile.baseUrl}"
+                textSize = 11f
+                setTextColor(tc.toolDefault)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+
+            val onToggle = {
+                if (isActive) {
+                    SavedLlmProfilesStore.disableActiveProfile()
+                } else {
+                    SavedLlmProfilesStore.enableProfile(profile.id)
+                }
+                rebindAgent()
+                recreate()
+            }
+
+            val selector = ImageView(this).apply {
+                setImageResource(
+                    if (isActive) R.drawable.icon_radio_selected
+                    else R.drawable.icon_radio_unselected
+                )
+                layoutParams = LinearLayout.LayoutParams(dp(22), dp(22)).apply {
+                    marginEnd = dp(12)
+                }
+                setOnClickListener { onToggle() }
+            }
+            card.setOnClickListener { onToggle() }
+
+            val btnEdit = TextView(this).apply {
+                text = "Edit"
+                textSize = 12f
+                setTextColor(getColor(R.color.colorBrandPrimary))
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setOnClickListener {
+                    CloudModelConfigDialog.show(
+                        context = this@LlmConfigActivity,
+                        dialogTitle = "Edit Cloud Model",
+                        preset = CloudModelConfigDialog.CloudModelInput(
+                            title = profile.title,
+                            apiKey = profile.apiKey,
+                            baseUrl = profile.baseUrl,
+                            modelName = profile.modelName
+                        )
+                    ) { input ->
+                        val updatedProfile = profile.copy(
+                            title = input.title,
+                            providerName = CloudProvider.CUSTOM.name,
+                            modelName = input.modelName,
+                            baseUrl = input.baseUrl,
+                            apiKey = input.apiKey
+                        )
+                        SavedLlmProfilesStore.updateProfile(updatedProfile)
+                        SavedLlmProfilesStore.refreshActiveIfMatching(profile.id)
+                        rebindAgent()
+                        Toast.makeText(this@LlmConfigActivity, "Config updated.", Toast.LENGTH_SHORT).show()
+                        recreate()
+                    }
+                }
+            }
+
+            val btnDelete = TextView(this).apply {
+                text = "Delete"
+                textSize = 12f
+                setTextColor(getColor(R.color.colorErrorPrimary))
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setOnClickListener {
+                    AlertDialog.showWarm(
+                        context = this@LlmConfigActivity,
+                        title = "Delete Config",
+                        message = "Delete \"${profile.title}\"? This cannot be undone.",
+                        actionTitle = "Delete",
+                        cancelTitle = getString(R.string.common_cancel),
+                        onAction = {
+                            SavedLlmProfilesStore.deleteProfile(profile.id)
+                            rebindAgent()
+                            recreate()
+                        }
+                    )
+                }
+            }
+
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            actions.addView(btnEdit)
+            actions.addView(btnDelete)
+
+            row.addView(selector)
+            row.addView(info)
+            row.addView(actions)
+            card.addView(row)
+            container.addView(card)
+        }
+    }
+
+    private fun buildProfileCardBackground(isActive: Boolean): GradientDrawable {
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(8).toFloat()
+            setColor(
+                getColor(if (isActive) R.color.colorBrandContainer else R.color.colorContainerBrighten)
+            )
+            setStroke(
+                dp(1),
+                getColor(if (isActive) R.color.colorBrandPrimary else R.color.colorBorderBase)
+            )
+        }
+    }
+
+    private fun rebindAgent() {
+        ClawApplication.appViewModelInstance.updateAgentConfig()
+        ClawApplication.appViewModelInstance.initAgent()
+        ClawApplication.appViewModelInstance.afterInit()
+    }
+
     override fun onResume() {
         super.onResume()
         window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)

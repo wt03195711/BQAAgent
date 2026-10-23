@@ -14,6 +14,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import io.agents.bqaagent.AppCapabilityCoordinator
 import io.agents.bqaagent.AppViewModel
+import io.agents.bqaagent.R
 import io.agents.bqaagent.ServiceBindingState
 import io.agents.bqaagent.TaskEvent
 import io.agents.bqaagent.TaskReasonCode
@@ -38,6 +39,13 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ExecutorService
 
+/** Active sensitive-confirmation request shown as a modal dialog in ChatScreen. */
+data class ChatSensitiveConfirmPrompt(
+    val actionSummary: String,
+    val riskType: String,
+    val deadlineMs: Long
+)
+
 data class TaskFlowUiState(
     val messages: SnapshotStateList<ChatMessage>,
     val modelStatus: MutableState<String>,
@@ -47,6 +55,8 @@ data class TaskFlowUiState(
     val screenshotBlockedIntent: MutableState<String> = androidx.compose.runtime.mutableStateOf(""),
     val skillSaveOverlayState: MutableState<SkillSaveOverlayState> =
         androidx.compose.runtime.mutableStateOf(SkillSaveOverlayState.Hidden),
+    val sensitiveConfirmPrompt: MutableState<ChatSensitiveConfirmPrompt?> =
+        androidx.compose.runtime.mutableStateOf(null),
 )
 
 /**
@@ -70,16 +80,24 @@ class TaskFlowController(
         private const val TAG = "TaskFlowController"
         /** Upper bound for the auto-derived default title (always ≤ SKILL_TITLE_MAX_LENGTH) */
         private const val DEFAULT_TITLE_MAX_LENGTH = 30
-        /** Hard cap on saved skills. Exceeding it fails a NEW-skill save so the user can prune in Settings and Retry. */
-        private const val MAX_SKILLS = 50
     }
 
     val showUserImageUpload: Boolean get() = uiState.showUserImageUpload.value
+
+    val sensitiveConfirmPrompt: ChatSensitiveConfirmPrompt? get() = uiState.sensitiveConfirmPrompt.value
 
     val skillSaveOverlay: MutableState<SkillSaveOverlayState> get() = uiState.skillSaveOverlayState
 
     private var sendTaskRetryCount = 0
     private var lastMonitorStatusNote: String? = null
+    /**
+     * Monitor target parked while the permission guide sheet is open. Cleared on resume or
+     * dismiss; [resumePendingMonitorIfReady] continues the original startMonitor flow with
+     * no duplicate user bubble (typedInput was already added before the sheet opened).
+     */
+    var pendingMonitorTarget: MonitorTargetSpec? = null
+        private set
+
     private val pipelineRouter = PipelineRouter(activity)
     private var activeToolGroupIndex: Int? = null
     private var activeReplayGroupIndex: Int? = null
@@ -188,7 +206,7 @@ class TaskFlowController(
         uiState.isAwaitingReply.value = false
         uiState.isTaskRunning.value = true
 
-        if (!KVUtils.hasLlmConfig()) {
+        if (!ModelConfigRepository.hasUsableModel()) {
             uiState.isTaskRunning.value = false
             Toast.makeText(activity, "Configure LLM in Settings first", Toast.LENGTH_LONG).show()
             onTaskTerminal?.invoke(TaskEvent.Failed("Configure LLM in Settings first."))
@@ -210,6 +228,7 @@ class TaskFlowController(
 
             activity.runOnUiThread {
                 try {
+                    (activity as? ComposeChatActivity)?.enableKeepAlive()
                     appViewModel.startTask(text, taskId, agentPromptOverride = agentPromptOverride) { event ->
                         activity.runOnUiThread { handleTaskEvent(event) }
                     }
@@ -223,6 +242,7 @@ class TaskFlowController(
     }
 
     private fun executeDirectToolTask(text: String, toolCall: DirectDeviceDataGuard.DeterministicToolCall) {
+        (activity as? ComposeChatActivity)?.enableKeepAlive()
         ensureNotificationPermission()
         resetStepTimeline()
         addUser(text)
@@ -284,7 +304,7 @@ class TaskFlowController(
         val target = MonitorTargetParser.fromTaskText(text)
         if (target == null) {
             addUser(text)
-            addSystem("Could not figure out who to monitor. Try: \"Monitor Mom on WhatsApp\"")
+            addSystem(activity.getString(R.string.monitor_unknown_target))
             return
         }
 
@@ -294,28 +314,54 @@ class TaskFlowController(
     fun startMonitor(target: MonitorTargetSpec, typedInput: String? = null) {
         val trimmedLabel = target.label.trim()
         if (trimmedLabel.isEmpty()) {
-            addSystem("Could not figure out who to monitor. Try: \"Monitor Mom on WhatsApp\"")
+            addSystem(activity.getString(R.string.monitor_unknown_target))
             return
         }
 
         typedInput?.let { addUser(it) }
-        val missing = AppCapabilityCoordinator.missingMonitorRequirements(activity)
+        // Non-blocking guide: park the target and surface the permission sheet. The sheet
+        // polls capabilities and calls resumePendingMonitorIfReady() once every required
+        // row is ready, so monitoring starts automatically after the user grants access.
+        val missing = AppCapabilityCoordinator.missingMonitorGuideRequirements(activity)
         if (missing.isNotEmpty()) {
-            Toast.makeText(
-                activity,
-                "Enable ${missing.joinToString(" & ") { it.label }} in Settings first",
-                Toast.LENGTH_LONG
-            ).show()
-            openSettings()
-            onTaskTerminal?.invoke(TaskEvent.Failed("Missing required permissions for monitoring."))
+            pendingMonitorTarget = target
+            XLog.i(TAG, "startMonitor: permission guide shown, missing=${missing.map { it.label }}")
+            (activity as? ComposeChatActivity)?.showMonitorPermissionGuide()
             return
         }
 
-        val contact = trimmedLabel
+        startMonitorNow(target)
+    }
+
+    /**
+     * Resume a parked monitor target if all required capabilities are now granted.
+     * Returns true when monitoring actually started. Safe to call from onResume, the
+     * permission-dialog callback, and the sheet's ready-detection polling.
+     */
+    fun resumePendingMonitorIfReady(): Boolean {
+        val target = pendingMonitorTarget ?: return false
+        if (AppCapabilityCoordinator.missingMonitorGuideRequirements(activity).isNotEmpty()) {
+            return false
+        }
+        pendingMonitorTarget = null
+        XLog.i(TAG, "resumePendingMonitorIfReady: all requirements granted, resuming monitor")
+        startMonitorNow(target)
+        return true
+    }
+
+    fun clearPendingMonitor() {
+        if (pendingMonitorTarget != null) {
+            XLog.i(TAG, "clearPendingMonitor: user dismissed the permission guide")
+            pendingMonitorTarget = null
+        }
+    }
+
+    private fun startMonitorNow(target: MonitorTargetSpec) {
+        val contact = target.label.trim()
         val app = target.app
         uiState.isAwaitingReply.value = false
         uiState.isTaskRunning.value = false
-        addSystem("Setting up auto-reply for $contact on $app...")
+        addSystem(activity.getString(R.string.monitor_setting_up, contact, app))
 
         val autoReplyManager = AutoReplyManager.getInstance()
         autoReplyManager.addTarget(contact, app)
@@ -325,7 +371,7 @@ class TaskFlowController(
         Handler(Looper.getMainLooper()).postDelayed({
             uiState.isAwaitingReply.value = false
             uiState.isTaskRunning.value = false
-            addSystem("Auto-reply is now active for ${target.displayLabel}.\nMonitoring in background. You can stop anytime from the bar above.")
+            addSystem(activity.getString(R.string.monitor_active, target.displayLabel))
             XLog.i(TAG, "startMonitor: monitor active, staying in BQAAgent")
         }, 1500)
     }
@@ -477,6 +523,27 @@ class TaskFlowController(
                     removeTypingIndicator()
                     addLlmStep(event, System.currentTimeMillis())
                 }
+                is TaskEvent.SensitiveConfirmRequest -> {
+                    uiState.isAwaitingReply.value = false
+                    uiState.isTaskRunning.value = true
+                    removeTypingIndicator()
+                    uiState.sensitiveConfirmPrompt.value = ChatSensitiveConfirmPrompt(
+                        actionSummary = event.actionSummary,
+                        riskType = event.riskType,
+                        deadlineMs = System.currentTimeMillis() + event.timeoutMs
+                    )
+                    addSystem("🔒 Sensitive action detected — confirmation required: ${event.actionSummary}")
+                }
+                is TaskEvent.SensitiveConfirmResult -> {
+                    uiState.sensitiveConfirmPrompt.value = null
+                    if (uiState.isTaskRunning.value) {
+                        if (event.approved) {
+                            addSystem("✅ Sensitive action confirmed, continuing task...")
+                        } else {
+                            addSystem("❌ Sensitive action rejected or confirmation timed out.")
+                        }
+                    }
+                }
                 is TaskEvent.Thinking -> Unit
             }
         } catch (e: Exception) {
@@ -544,6 +611,7 @@ class TaskFlowController(
         activeToolGroupIndex = null
         loopStartedAt.clear()
         onTaskSettled?.invoke()
+        (activity as? ComposeChatActivity)?.disableKeepAlive()
         Handler(Looper.getMainLooper()).postDelayed({
             try {
                 chatSessionController.loadModelIfReady(
@@ -808,9 +876,9 @@ class TaskFlowController(
         // skill's template (matchedSkill != null) is never blocked.
         if (saveData.matchedSkill == null) {
             val currentSkillCount = SkillStore.getAllSkills().size
-            if (currentSkillCount >= MAX_SKILLS) {
+            if (currentSkillCount >= SkillStore.MAX_SKILLS) {
                 uiState.skillSaveOverlayState.value =
-                    SkillSaveOverlayState.SkillLimitReached(currentSkillCount, MAX_SKILLS, saveData)
+                    SkillSaveOverlayState.SkillLimitReached(currentSkillCount, SkillStore.MAX_SKILLS, saveData)
                 return
             }
         }

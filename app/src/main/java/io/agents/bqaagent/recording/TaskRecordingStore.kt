@@ -217,11 +217,16 @@ object TaskRecordingStore {
      * deletion — never a single segment. The most recent recording is always kept, even if it alone
      * exceeds the cap, so a just-saved recording is never pruned by its own write.
      *
+     * [protectIds] are recording ids (== directory names) that must NEVER be pruned — used by a live
+     * batch to shield its own recordings while it is still running. A protected recording that keeps
+     * the total over the cap is simply left in place; the batch pre-flight budget check is what stops
+     * the disk from overflowing, not retention.
+     *
      * Count and age limits were removed by design: total size is the only retention rule now.
      * MIN_FREE_BYTES stays separate — it is the "don't start when the disk is nearly full" admission
      * gate (hasRoomForRecording), not a retention rule.
      */
-    fun enforceRetention() {
+    fun enforceRetention(protectIds: Set<String> = emptySet()) {
         val entries = listRecordings()          // newest first (listRecordings sorts by updatedAt desc)
         if (entries.size <= 1) return
         var bytes = entries.sumOf { dirSize(it.dir) }
@@ -230,6 +235,7 @@ object TaskRecordingStore {
         // asReversed() = oldest -> newest; dropLast(1) excludes the newest so it is never deleted.
         for (entry in entries.asReversed().dropLast(1)) {
             if (bytes <= MAX_TOTAL_BYTES) break
+            if (entry.dir.name in protectIds) continue   // never prune a live batch's own recording
             val size = dirSize(entry.dir)
             deleteRecording(entry.dir)
             bytes -= size

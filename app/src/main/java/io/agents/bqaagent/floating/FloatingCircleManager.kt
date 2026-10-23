@@ -4,15 +4,15 @@
 package io.agents.bqaagent.floating
 
 import android.app.Application
+import android.animation.ValueAnimator
 import android.content.res.Resources
 import android.os.Handler
 import android.os.Looper
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.ImageView
+import android.view.animation.LinearInterpolator
 import android.widget.TextView
-import androidx.annotation.DrawableRes
 import com.blankj.utilcode.util.ThreadUtils
 import io.agents.bqaagent.R
 import io.agents.bqaagent.channel.Channel
@@ -26,56 +26,82 @@ import com.lzf.easyfloat.interfaces.OnFloatCallbacks
 import com.lzf.easyfloat.utils.DisplayUtils
 
 /**
- * Circular floating window manager
- * Uses EasyFloat to implement a draggable floating window that remembers its position
- * Supports multiple states: waiting for task (IDLE), task running (RUNNING), task succeeded (SUCCESS), task failed (ERROR)
+ * Floating window manager (EasyFloat based, draggable, remembers position).
+ *
+ * The window has exactly TWO visual styles:
+ *  - a resting pill (system logo) shown whenever no task is running;
+ *  - an active pill shown while a task runs, with the dynamic status on the left
+ *    and a dedicated Stop button on the right.
+ * Terminal states (success/error/stopped/cancelled) do NOT show a distinct icon —
+ * they simply fall back to the resting pill.
  */
 object FloatingCircleManager {
 
     private const val FLOAT_TAG = "circle_float"
     private const val KEY_FLOAT_X = "floating_circle_x"
     private const val KEY_FLOAT_Y = "floating_circle_y"
-    private const val AUTO_RESET_DELAY_MS = 5000L // auto-reset after 5 seconds
 
-    /**
-     * Floating window state
-     */
     enum class State {
-        IDLE,           // waiting for task (default)
-        TASK_NOTIFY,    // task notification received (pill expanded)
-        RUNNING,        // task running
-        SUCCESS,        // task completed
-        ERROR,          // task failed
-        STOPPED,        // task stopped by system rule / permission
-        CANCELLED       // task cancelled by user
+        IDLE,           // resting
+        TASK_NOTIFY,    // active: a task has just started
+        RUNNING,        // active: agent loop running
+        SUCCESS,        // finished → renders resting pill
+        ERROR,          // finished → renders resting pill
+        STOPPED,        // finished → renders resting pill
+        CANCELLED       // finished → renders resting pill
     }
+
+    /** Which screen edge the pill is docked to. It can only rest on the left/right edge. */
+    enum class DockSide { LEFT, RIGHT }
 
     private var isShowing = false
     private var currentState: State = State.IDLE
     private var currentRound: Int = 0
+    private var dockedSide: DockSide = DockSide.LEFT
     private var currentChannel: Channel? = null
     private var currentTokenState: io.agents.bqaagent.agent.TokenMonitor.State = io.agents.bqaagent.agent.TokenMonitor.State.NORMAL
 
-    private const val TASK_NOTIFY_DURATION_MS = 3000L // task notification shown for 3 seconds before collapsing
+    private const val TASK_NOTIFY_DURATION_MS = 3000L // show task text for 3s before collapsing to RUNNING
+
+    // Intent scroll: one-shot right→left pan that stops at the text tail (no loop, no blank).
+    private const val INTENT_SCROLL_PX_PER_MS = 0.1f
+    private const val INTENT_SCROLL_START_DELAY_MS = 600L
+    private const val INTENT_MIN_SCROLL_MS = 800L
+    private const val INTENT_MAX_SCROLL_MS = 8000L
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var autoResetRunnable: Runnable? = null
     private var notifyCollapseRunnable: Runnable? = null
     private var pendingTaskText: String = ""
+    private var currentIntent: String = ""
+    private var intentScrollAnimator: ValueAnimator? = null
 
     private var appRef: Application? = null
 
-    /**
-     * Show the floating window
-     * @param application Application instance
-     * @param x initial X position (optional, defaults to right-center of screen)
-     * @param y initial Y position (optional, defaults to screen center)
-     */
+    // Incremented on every hide(). A float whose creation callback sees a changed
+    // generation was created around a hide() and must NOT render a stale icon.
+    private var creationGeneration = 0
+
+    fun init(application: Application) {
+        appRef = application
+    }
+
     fun show(
         application: Application,
         x: Int? = null,
         y: Int? = null
     ) {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                show(application, x, y)
+            }
+            return
+        }
+
+        if (!KVUtils.isFloatingWindowEnabled()) {
+            XLog.i("FloatingCircle", "show() skipped — floating window feature is off")
+            return
+        }
+
         XLog.i("FloatingCircle", "show() called, isShowing=$isShowing")
         if (isShowing || EasyFloat.getFloatView(FLOAT_TAG) != null) {
             isShowing = true
@@ -83,14 +109,12 @@ object FloatingCircleManager {
             return
         }
         appRef = application
+        val genAtCreate = creationGeneration
 
-        // Calculate default position: right side of screen center
-        val screenWidth = DisplayUtils.getScreenWidth(application)
         val screenHeight = DisplayUtils.getScreenHeight(application)
         val defaultX = 0
         val defaultY = screenHeight / 2
 
-        // Read saved position from local storage
         val savedX = getSavedX() ?: x ?: defaultX
         val savedY = getSavedY() ?: y ?: defaultY
 
@@ -109,26 +133,27 @@ object FloatingCircleManager {
                     msg: String?,
                     view: View?
                 ) {
+                    if (genAtCreate != creationGeneration) {
+                        XLog.i("FloatingCircle", "createdResult ignored — hide() raced creation")
+                        EasyFloat.dismiss(FLOAT_TAG, true)
+                        isShowing = false
+                        return
+                    }
                     XLog.i("FloatingCircle", "createdResult: isCreated=$isCreated, msg=$msg, view=${view != null}")
-                    // Cache the original circle width (must be before any setFloatRootWidth call)
-                    view?.findViewById<View>(R.id.floatRoot)?.let { root ->
-                        if (circleWidthPx <= 0) {
-                            circleWidthPx = root.layoutParams?.width ?: -1
-                        }
-                    }
-                    // Click events: tap to stop if running, otherwise bring app to foreground
+                    // During an active task the Stop button is the ONLY interactive control
+                    // (it cancels the task and foregrounds the app). Tapping anywhere else on the
+                    // active pill does nothing, so dragging/pressing the info area never triggers
+                    // an action. When idle (no task), tapping the pill foregrounds the app.
+                    view?.findViewById<View>(R.id.btnStop)?.setOnClickListener { onStopTask() }
                     view?.setOnClickListener {
-                        if (currentState == State.RUNNING || currentState == State.TASK_NOTIFY) {
-                            onStopTask()
-                        } else {
-                            onFloatClick()
+                        if (currentState == State.TASK_NOTIFY || currentState == State.RUNNING) {
+                            return@setOnClickListener
                         }
+                        onFloatClick()
                     }
-                    // Initialize state
                     updateStateView(view, currentState)
-                    // Detect position after layout to prevent the bubble from getting stuck off-screen
                     view?.post {
-                        ensureFloatInBounds(view)
+                        enforceEdgeDocking(view, resolveSide = true)
                     }
                 }
 
@@ -140,8 +165,7 @@ object FloatingCircleManager {
                 }
 
                 override fun dragEnd(view: View) {
-                    // Drag ended; correct position and save
-                    ensureFloatInBounds(view)
+                    enforceEdgeDocking(view, resolveSide = true)
                 }
 
                 override fun hide(view: View) {
@@ -150,7 +174,9 @@ object FloatingCircleManager {
 
                 override fun show(view: View) {
                     isShowing = true
-                    // Restore UI state when overlay reappears after app switch
+                    // Persistent model: whenever the toggle is ON, the pill reappears in whatever
+                    // its current visual state is once it becomes visible again (e.g. after leaving
+                    // a FLAG_SECURE target app that temporarily hid it).
                     updateStateView(view, currentState)
                 }
 
@@ -161,26 +187,37 @@ object FloatingCircleManager {
             .show()
     }
 
-    /**
-     * Hide the floating window
-     */
     fun hide() {
-        if (isShowing) {
-            EasyFloat.dismiss(FLOAT_TAG)
-            isShowing = false
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                hide()
+            }
+            return
         }
+
+        EasyFloat.dismiss(FLOAT_TAG, true)
+        isShowing = false
+        currentState = State.IDLE
+        creationGeneration++
+        cancelNotifyCollapse()
+        intentScrollAnimator?.cancel()
+        intentScrollAnimator = null
     }
 
-    /**
-     * Check whether the floating window is currently visible
-     */
     fun isShowing(): Boolean = isShowing
 
-    /**
-     * Ensure the floating window is showing. If it was dismissed (e.g. by
-     * ComposeChatActivity.onCreate), re-show it so task status is visible.
-     */
     fun ensureShowing() {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                ensureShowing()
+            }
+            return
+        }
+
+        if (!KVUtils.isFloatingWindowEnabled()) {
+            return
+        }
+
         if (!isShowing && EasyFloat.getFloatView(FLOAT_TAG) == null) {
             val app = appRef
             if (app != null) {
@@ -192,31 +229,17 @@ object FloatingCircleManager {
         }
     }
 
-    /**
-     * Switch to idle state (waiting for task)
-     */
     fun setIdleState() {
-        ThreadUtils.runOnUiThread {
-            setState(State.IDLE)
-            hide()
-        }
+        ThreadUtils.runOnUiThread { setState(State.IDLE) }
     }
 
-    /**
-     * Show task notification: expand the floating window to pill shape, display task content, auto-collapse to RUNNING after 3 seconds.
-     * @param taskText task text (will be truncated for display)
-     * @param channel source channel of the message
-     */
     fun showTaskNotify(taskText: String, channel: Channel) {
         ThreadUtils.runOnUiThread {
             pendingTaskText = taskText
             currentChannel = channel
             cancelNotifyCollapse()
             setState(State.TASK_NOTIFY)
-            // Auto-collapse to RUNNING after 3 seconds (call setState directly, bypassing TASK_NOTIFY guard)
-            notifyCollapseRunnable = Runnable {
-                setState(State.RUNNING)
-            }
+            notifyCollapseRunnable = Runnable { setState(State.RUNNING) }
             mainHandler.postDelayed(notifyCollapseRunnable!!, TASK_NOTIFY_DURATION_MS)
         }
     }
@@ -228,224 +251,157 @@ object FloatingCircleManager {
         }
     }
 
-    /**
-     * Switch to task running state
-     * @param round current round number
-     * @param channel source channel of the message
-     */
     fun setRunningState(round: Int, channel: Channel) {
         ThreadUtils.runOnUiThread {
-            currentRound = round
             currentChannel = channel
-            // If the task notification pill is still showing, only update data; do not switch UI (wait for timer to expire)
-            if (currentState == State.TASK_NOTIFY) {
-                return@runOnUiThread
+            // Do NOT bump the step here: step and intent must advance together (see updateTokenStatus).
+            // Advancing the step ahead of the intent is exactly what made the pill show a new step
+            // with the previous step's stale intent. Just make sure we are visually RUNNING.
+            if (currentState != State.TASK_NOTIFY && currentState != State.RUNNING) {
+                setState(State.RUNNING)
             }
-            setState(State.RUNNING)
         }
     }
 
-    /**
-     * Update token monitor display on the running pill.
-     * Call this after each agent loop iteration.
-     *
-     * @param step current step number
-     * @param formattedTokens e.g. "33K"
-     * @param formattedCost e.g. "$0.01"
-     * @param tokenState NORMAL/CAUTION/WARNING/CRITICAL
-     */
-    fun updateTokenStatus(step: Int, formattedTokens: String, formattedCost: String, tokenState: io.agents.bqaagent.agent.TokenMonitor.State) {
+    fun updateTokenStatus(step: Int, formattedTokens: String, formattedCost: String, tokenState: io.agents.bqaagent.agent.TokenMonitor.State, intent: String) {
         ThreadUtils.runOnUiThread {
+            // Step and intent are the ONLY place both change, so they always stay a consistent pair.
             currentRound = step
             currentTokenState = tokenState
-            val view = EasyFloat.getFloatView(FLOAT_TAG) ?: return@runOnUiThread
-            val tvStatus = view.findViewById<TextView>(R.id.tvTokenStatus) ?: return@runOnUiThread
-            tvStatus.text = "Step $step | $formattedTokens | $formattedCost"
+            currentIntent = intent
+            // Render immediately while RUNNING. During the TASK_NOTIFY banner just record the latest
+            // pair; its collapse to RUNNING (updateStateView → renderStepIntent) will show it.
+            if (currentState != State.RUNNING) return@runOnUiThread
+            renderStepIntent()
+        }
+    }
 
-            // Update pill color based on token state
-            val cardRunning = view.findViewById<androidx.cardview.widget.CardView>(R.id.cardRunning) ?: return@runOnUiThread
-            val colorRes = when (tokenState) {
-                io.agents.bqaagent.agent.TokenMonitor.State.NORMAL -> R.color.colorBrandPrimary
-                io.agents.bqaagent.agent.TokenMonitor.State.CAUTION -> R.color.colorWarningPrimary
-                io.agents.bqaagent.agent.TokenMonitor.State.WARNING -> R.color.colorWarningPrimary
-                io.agents.bqaagent.agent.TokenMonitor.State.CRITICAL -> R.color.colorErrorPrimary
+    /**
+     * Render the current (step, intent) pair together onto the running pill. Stops any in-progress
+     * intent scroll first, so new content appears at once (Step N fixed, intent from offset 0).
+     */
+    private fun renderStepIntent() {
+        val view = EasyFloat.getFloatView(FLOAT_TAG) ?: return
+        val tvStep = view.findViewById<TextView>(R.id.tvStep) ?: return
+        val tvIntent = view.findViewById<TextView>(R.id.tvIntent)
+        tvStep.text = if (currentRound > 0) "Step $currentRound" else ""
+        applyIntentText(tvIntent, currentIntent)
+        // The intent length can grow/shrink the pill. Re-glue to the docked edge after layout so a
+        // right-docked pill never leaves a gap when the text gets shorter.
+        view.post { enforceEdgeDocking(view, resolveSide = false) }
+    }
+
+    /**
+     * Show the intent text directly (no marquee fade-in). If it exceeds the fixed 160dp line,
+     * scroll it once from right to left (revealing the tail) and STOP there — never loops,
+     * never leaves blank. Short text simply sits at scroll offset 0.
+     */
+    private fun applyIntentText(tvIntent: TextView?, text: String) {
+        if (tvIntent == null) return
+        intentScrollAnimator?.cancel()
+        intentScrollAnimator = null
+        // Show the FULL text on one horizontally-scrollable line: no "…" ellipsis. The width
+        // hugs the content (wrap_content) and only caps at maxWidth(160dp); scrolling kicks in
+        // only when the text is wider than the view.
+        tvIntent.ellipsize = null
+        tvIntent.setHorizontallyScrolling(true)
+        tvIntent.scrollTo(0, 0)
+        tvIntent.text = text
+        tvIntent.post {
+            // Skip if the task already left the active states before layout ran.
+            if (currentState != State.TASK_NOTIFY && currentState != State.RUNNING) return@post
+            val available = tvIntent.width
+            if (available <= 0) return@post
+            val textWidth = tvIntent.paint.measureText(text)
+            val extra = textWidth - available
+            if (extra <= 1f) {
+                tvIntent.scrollTo(0, 0)
+                return@post
             }
-            try {
-                val app = appRef ?: return@runOnUiThread
-                cardRunning.setCardBackgroundColor(app.getColor(colorRes))
-            } catch (_: Exception) {}
+            val duration = (extra / INTENT_SCROLL_PX_PER_MS)
+                .toLong()
+                .coerceIn(INTENT_MIN_SCROLL_MS, INTENT_MAX_SCROLL_MS)
+            val anim = ValueAnimator.ofInt(0, extra.toInt())
+            anim.duration = duration
+            anim.startDelay = INTENT_SCROLL_START_DELAY_MS
+            anim.interpolator = LinearInterpolator()
+            anim.addUpdateListener { tvIntent.scrollTo(it.animatedValue as Int, 0) }
+            intentScrollAnimator = anim
+            anim.start()
         }
     }
 
-    /**
-     * Switch to task completed state (auto-resets to IDLE after 5 seconds)
-     */
+    /** Task finished (success). No distinct icon — just returns to the resting pill. */
     fun setSuccessState() {
-        ThreadUtils.runOnUiThread {
-            setState(State.SUCCESS)
-            scheduleAutoReset()
-        }
+        ThreadUtils.runOnUiThread { setState(State.SUCCESS) }
     }
 
-    /**
-     * Switch to task failed state (auto-resets to IDLE after 5 seconds)
-     */
+    /** Task failed → return to the resting pill. */
     fun setErrorState() {
-        ThreadUtils.runOnUiThread {
-            setState(State.ERROR)
-            scheduleAutoReset()
-        }
-
+        ThreadUtils.runOnUiThread { setState(State.ERROR) }
     }
 
-    /**
-     * Switch to task stopped state — system-decided termination (auto-resets to IDLE after 5 seconds)
-     */
+    /** Task stopped by system → return to the resting pill. */
     fun setStoppedState() {
-        ThreadUtils.runOnUiThread {
-            setState(State.STOPPED)
-            scheduleAutoReset()
-        }
+        ThreadUtils.runOnUiThread { setState(State.STOPPED) }
     }
 
-    /**
-     * Switch to task cancelled state — user-initiated (auto-resets to IDLE after 5 seconds)
-     */
+    /** Task cancelled by user → return to the resting pill. */
     fun setCancelledState() {
-        ThreadUtils.runOnUiThread {
-            setState(State.CANCELLED)
-            scheduleAutoReset()
-        }
+        ThreadUtils.runOnUiThread { setState(State.CANCELLED) }
     }
 
-    /**
-     * Set state
-     */
     private fun setState(state: State) {
         currentState = state
         val view = EasyFloat.getFloatView(FLOAT_TAG)
         XLog.i("FloatingCircle", "setState: $state, view=${view != null}, isShowing=$isShowing")
         view?.let { updateStateView(it, state) }
+        // The pill width differs between idle (circle) and active (capsule). Re-glue it to the
+        // already-docked edge so a width change never leaves a gap or pushes it off-screen.
+        view?.post { enforceEdgeDocking(view, resolveSide = false) }
     }
 
-    /**
-     * Update view state
-     */
     private fun updateStateView(view: View?, state: State) {
         if (view == null) return
 
         val cardIdle = view.findViewById<View>(R.id.cardIdle)
-        val cardTaskNotify = view.findViewById<View>(R.id.cardTaskNotify)
-        val cardRunning = view.findViewById<View>(R.id.cardRunning)
-        val cardSuccess = view.findViewById<View>(R.id.cardSuccess)
-        val cardError = view.findViewById<View>(R.id.cardError)
-        val cardStopped = view.findViewById<View>(R.id.cardStopped)
-        val cardCancelled = view.findViewById<View>(R.id.cardCancelled)
+        val cardActive = view.findViewById<View>(R.id.cardActive)
 
-        // Hide all state views
-        cardIdle?.visibility = View.GONE
-        cardTaskNotify?.visibility = View.GONE
-        cardRunning?.visibility = View.GONE
-        cardSuccess?.visibility = View.GONE
-        cardError?.visibility = View.GONE
-        cardStopped?.visibility = View.GONE
-        cardCancelled?.visibility = View.GONE
+        // Exactly two styles: active pill (TASK_NOTIFY/RUNNING) vs resting pill (everything else).
+        val isActive = state == State.TASK_NOTIFY || state == State.RUNNING
+        cardActive?.visibility = if (isActive) View.VISIBLE else View.GONE
+        cardIdle?.visibility = if (isActive) View.GONE else View.VISIBLE
 
-        // Cancel any previous auto-reset
-        cancelAutoReset()
-
-        // Show corresponding state
-        when (state) {
-            State.IDLE -> {
-                cardIdle?.visibility = View.VISIBLE
-                setFloatRootWidth(view, getCircleWidth(view))
-            }
-            State.TASK_NOTIFY -> {
-                cardTaskNotify?.visibility = View.VISIBLE
-                val tvNotify = view.findViewById<TextView>(R.id.tvTaskNotify)
-                val app = appRef ?: return
-                val displayText = if (pendingTaskText.length > 40) {
-                    pendingTaskText.substring(0, 40) + "…"
-                } else {
-                    pendingTaskText
-                }
-                tvNotify?.text = app.getString(R.string.floating_task_received, displayText)
-                val ivLogo = view.findViewById<ImageView>(R.id.ivNotifyChannelLogo)
-                ivLogo?.setImageResource(getChannelIcon(currentChannel))
-                // Expand to wrap_content
-                setFloatRootWidth(view, WindowManager.LayoutParams.WRAP_CONTENT)
-            }
-            State.RUNNING -> {
+        if (isActive) {
+            val tvStep = view.findViewById<TextView>(R.id.tvStep)
+            val tvIntent = view.findViewById<TextView>(R.id.tvIntent)
+            if (state == State.TASK_NOTIFY) {
+                val app = appRef
+                val message = app?.getString(R.string.floating_task_received, pendingTaskText) ?: pendingTaskText
+                tvStep?.text = ""
+                applyIntentText(tvIntent, message)
+            } else {
+                // RUNNING: cancel pending notify-collapse; render step+intent together as one pair.
                 cancelNotifyCollapse()
-                // Expand to pill shape for token display
-                setFloatRootWidth(view, WindowManager.LayoutParams.WRAP_CONTENT)
-                cardRunning?.visibility = View.VISIBLE
-                // Update token status text
-                val tvStatus = view.findViewById<TextView>(R.id.tvTokenStatus)
-                tvStatus?.text = "Step ${currentRound}"
+                renderStepIntent()
             }
-            State.SUCCESS -> {
-                cancelNotifyCollapse()
-                cardSuccess?.visibility = View.VISIBLE
-                setFloatRootWidth(view, getCircleWidth(view))
-            }
-            State.ERROR -> {
-                cancelNotifyCollapse()
-                cardError?.visibility = View.VISIBLE
-                setFloatRootWidth(view, getCircleWidth(view))
-            }
-            State.STOPPED -> {
-                cancelNotifyCollapse()
-                cardStopped?.visibility = View.VISIBLE
-                setFloatRootWidth(view, getCircleWidth(view))
-            }
-            State.CANCELLED -> {
-                cancelNotifyCollapse()
-                cardCancelled?.visibility = View.VISIBLE
-                setFloatRootWidth(view, getCircleWidth(view))
-            }
+        } else {
+            intentScrollAnimator?.cancel()
+            intentScrollAnimator = null
         }
     }
 
     /**
-     * Get the icon for the corresponding channel
+     * Snap the pill to the nearest screen edge so it can never rest in the middle.
+     * - [resolveSide] = true (after a drag / first show): decide LEFT/RIGHT from the pill's center.
+     * - [resolveSide] = false (after a width change): keep the current side, just re-glue.
+     * Also mirrors the active pill layout so the Stop button hugs the docked edge.
      */
-    @DrawableRes
-    private fun getChannelIcon(channel: Channel?): Int {
-        return R.drawable.ic_launcher
-    }
-
-    /**
-     * Auto-reset to IDLE state after 5 seconds
-     */
-    private fun scheduleAutoReset() {
-        cancelAutoReset()
-        autoResetRunnable = Runnable {
-            setIdleState()
-        }
-        mainHandler.postDelayed(autoResetRunnable!!, AUTO_RESET_DELAY_MS)
-    }
-
-    /**
-     * Cancel the auto-reset
-     */
-    private fun cancelAutoReset() {
-        autoResetRunnable?.let {
-            mainHandler.removeCallbacks(it)
-            autoResetRunnable = null
-        }
-    }
-
-    /**
-     * Ensure the floating window stays within the visible screen area; correct if out of bounds
-     */
-    private fun ensureFloatInBounds(view: View) {
-        val screenHeight = Resources.getSystem().displayMetrics.heightPixels
+    private fun enforceEdgeDocking(view: View, resolveSide: Boolean) {
         val screenWidth = Resources.getSystem().displayMetrics.widthPixels
-        // Get navigation bar height to ensure the bubble is not covered by the nav bar
+        val screenHeight = Resources.getSystem().displayMetrics.heightPixels
         val navBarHeight = getNavigationBarHeight()
 
-        // Method 1: try to find WindowManager.LayoutParams from the view hierarchy
         var wmParams: WindowManager.LayoutParams? = null
         var wmView: View? = view
         while (wmView != null) {
@@ -456,83 +412,101 @@ object FloatingCircleManager {
             }
             wmView = wmView.parent as? View
         }
-
-        if (wmParams != null) {
-            val floatHeight = (wmView ?: view).height
-            val floatWidth = (wmView ?: view).width
-            val maxX = (screenWidth - floatWidth).coerceAtLeast(0)
-            // Subtract navigation bar height and extra safety margin
-            val maxY = (screenHeight - floatHeight - navBarHeight - 50).coerceAtLeast(0)
-            val clampedX = wmParams.x.coerceIn(0, maxX)
-            val clampedY = wmParams.y.coerceIn(0, maxY)
-            if (clampedX != wmParams.x || clampedY != wmParams.y) {
-                EasyFloat.updateFloat(FLOAT_TAG, clampedX, clampedY)
-            }
-            savePosition(clampedX, clampedY)
+        val params = wmParams ?: return
+        val measured = wmView ?: view
+        val floatWidth = measured.width
+        val floatHeight = measured.height
+        if (floatWidth <= 0 || floatHeight <= 0) {
+            // Not laid out yet — retry after the next layout pass.
+            view.post { enforceEdgeDocking(view, resolveSide) }
             return
         }
 
-        // Fallback: detect with getLocationOnScreen, correct with updateFloat
-        val location = IntArray(2)
-        view.getLocationOnScreen(location)
-        val viewBottom = location[1] + view.height
-        if (viewBottom > screenHeight - navBarHeight || location[1] < 0) {
-            val safeY = screenHeight / 3
-            EasyFloat.updateFloat(FLOAT_TAG, location[0].coerceIn(0, screenWidth), safeY)
-            savePosition(location[0].coerceIn(0, screenWidth), safeY)
+        // Keep the whole pill within the screen width (shrink the intent cap on narrow screens).
+        if (clampIntentMaxWidth(view)) {
+            // maxWidth changed → pill width changes on the next layout; re-run to settle X/edge.
+            view.post { enforceEdgeDocking(view, resolveSide) }
+            return
+        }
+
+        val maxY = (screenHeight - floatHeight - navBarHeight - 50).coerceAtLeast(0)
+        val clampedY = params.y.coerceIn(0, maxY)
+
+        if (resolveSide) {
+            val centerX = params.x + floatWidth / 2
+            dockedSide = if (centerX > screenWidth / 2) DockSide.RIGHT else DockSide.LEFT
+        }
+        val targetX = if (dockedSide == DockSide.RIGHT) {
+            (screenWidth - floatWidth).coerceAtLeast(0)
         } else {
-            savePosition(location[0], location[1])
+            0
+        }
+
+        if (targetX != params.x || clampedY != params.y) {
+            EasyFloat.updateFloat(FLOAT_TAG, targetX, clampedY)
+        }
+        savePosition(targetX, clampedY)
+        applyDockSide(view)
+    }
+
+    /** Mirror the running pill for right-edge docking: Stop button to the right, text to the left. */
+    private fun applyDockSide(view: View?) {
+        if (view == null) return
+        val container = view.findViewById<View>(R.id.activeContainer) ?: return
+        container.layoutDirection = if (dockedSide == DockSide.RIGHT) {
+            View.LAYOUT_DIRECTION_RTL
+        } else {
+            View.LAYOUT_DIRECTION_LTR
+        }
+    }
+
+    /**
+     * Cap the intent line width so the ENTIRE pill never exceeds the screen width.
+     * target = min(160dp, screenWidth - chrome - safety). Returns true if the cap actually changed
+     * (the caller then re-measures/re-glues on the next layout pass). Wide screens keep 160dp.
+     */
+    private fun clampIntentMaxWidth(view: View): Boolean {
+        val density = Resources.getSystem().displayMetrics.density
+        val screenW = Resources.getSystem().displayMetrics.widthPixels
+        fun dp(value: Float) = (value * density)
+
+        val tvIntent = view.findViewById<TextView>(R.id.tvIntent) ?: return false
+        val tvStep = view.findViewById<TextView>(R.id.tvStep)
+        val btnStop = view.findViewById<View>(R.id.btnStop)
+
+        // Everything on the pill besides the intent line (use real widths once laid out).
+        val stopW = btnStop?.width ?: dp(42f).toInt()                    // 32dp button + 10dp marginEnd
+        val stepW = (tvStep?.width ?: dp(58f).toInt()) + dp(6f).toInt()  // Step text + 6dp marginEnd
+        val chrome = stopW + stepW + dp(24f).toInt() + dp(4f).toInt()    // + paddings(8+16) + strokes(2*2)
+        val safety = dp(8f).toInt()
+
+        val screenCap = screenW - chrome - safety
+        val target = screenCap.coerceAtMost(dp(160f).toInt()).coerceAtLeast(dp(24f).toInt())
+        return if (tvIntent.maxWidth != target) {
+            tvIntent.maxWidth = target
+            true
+        } else {
+            false
         }
     }
 
     private fun getNavigationBarHeight(): Int = BarUtils.getNavBarHeight()
 
-    /** Original width of the circle state (read from layout on first use and cached) */
-    private var circleWidthPx: Int = -1
-
-    /** Dynamically change the floating window root layout width (expand to pill / collapse to circle) */
-    private fun setFloatRootWidth(view: View, widthPx: Int) {
-        val root = view.findViewById<View>(R.id.floatRoot) ?: return
-        val lp = root.layoutParams
-        if (lp != null && lp.width != widthPx) {
-            lp.width = widthPx
-            root.layoutParams = lp
-        }
-    }
-
-    /** Get the width of the circle state (cached from createdResult to match the XML definition) */
-    private fun getCircleWidth(@Suppress("UNUSED_PARAMETER") view: View): Int {
-        return if (circleWidthPx > 0) circleWidthPx else WindowManager.LayoutParams.WRAP_CONTENT
-    }
-
-
-    /**
-     * Save position
-     */
     private fun savePosition(x: Int, y: Int) {
         KVUtils.putInt(KEY_FLOAT_X, x)
         KVUtils.putInt(KEY_FLOAT_Y, y)
     }
 
-    /**
-     * Get saved X coordinate
-     */
     private fun getSavedX(): Int? {
         val x = KVUtils.getInt(KEY_FLOAT_X, -1)
         return if (x == -1) null else x
     }
 
-    /**
-     * Get saved Y coordinate
-     */
     private fun getSavedY(): Int? {
         val y = KVUtils.getInt(KEY_FLOAT_Y, -1)
         return if (y == -1) null else y
     }
 
-    /**
-     * Click callback, can be set externally
-     */
     var onFloatClick: () -> Unit = {}
     var onStopTask: () -> Unit = {}
 }

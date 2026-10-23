@@ -16,6 +16,8 @@ import io.agents.bqaagent.utils.XLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.net.InetSocketAddress
@@ -24,6 +26,7 @@ import java.util.Collections
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 object LocalAdbAutomation {
@@ -43,6 +46,11 @@ object LocalAdbAutomation {
     private const val EXTRA_FRAGMENT_ARG_KEY = ":settings:fragment_args_key"
     private const val EXTRA_SHOW_FRAGMENT_ARGUMENTS = ":settings:show_fragment_args"
     private const val WIRELESS_DEBUGGING_PREF_KEY = "toggle_adb_wireless"
+    private const val HEARTBEAT_INTERVAL_MS = 30_000L
+    private const val HEARTBEAT_SLOW_INTERVAL_MS = 180_000L
+    private const val HEARTBEAT_BACKOFF_THRESHOLD = 2
+    private const val REDISCOVER_COOLDOWN_MS = 60_000L
+    private const val REDISCOVER_DISCOVERY_TIMEOUT_MS = 4_000L
 
     private val lock = Any()
     private val probeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -51,16 +59,23 @@ object LocalAdbAutomation {
     private var initialized = false
 
     @Volatile
-    private var client: Kadb? = null
+    private var appContext: Context? = null
 
     @Volatile
-    private var readyProbeRunning = false
+    private var client: Kadb? = null
+
+    private val readyProbeRunning = AtomicBoolean(false)
+    private val rediscoveryRunning = AtomicBoolean(false)
+    private val heartbeatStarted = AtomicBoolean(false)
 
     @Volatile
     private var lastReadyAt = 0L
 
     @Volatile
     private var lastFailedProbeAt = 0L
+
+    @Volatile
+    private var lastRediscoverAt = 0L
 
     data class SetupRequest(
         val host: String,
@@ -84,7 +99,9 @@ object LocalAdbAutomation {
         synchronized(lock) {
             if (initialized) return
             initialized = true
+            appContext = context.applicationContext
             ensureIdentityLocked()
+            startHeartbeat()
             XLog.i(TAG, "Local ADB initialized")
         }
     }
@@ -123,7 +140,7 @@ object LocalAdbAutomation {
         if (ready) {
             markReady()
         } else {
-            lastFailedProbeAt = System.currentTimeMillis()
+            markFailed()
         }
         return ready
     }
@@ -140,32 +157,55 @@ object LocalAdbAutomation {
 
     @JvmStatic
     fun refreshReadyAsync() {
-        if (!hasConnectionConfig() || readyProbeRunning) return
-        readyProbeRunning = true
+        if (!hasConnectionConfig()) return
+        if (!readyProbeRunning.compareAndSet(false, true)) return
         probeScope.launch {
             try {
                 awaitReady(5_000L)
             } finally {
-                readyProbeRunning = false
+                readyProbeRunning.set(false)
             }
         }
     }
 
     @JvmStatic
     fun exec(command: String, timeoutMs: Long = 15_000L): ShellCommandResult {
+        val first = exec(command, timeoutMs, logFailure = true)
+        if (first.isSuccess || !isTransportFailure(first)) return first
+        if (!attemptRediscoverAndReconnect()) return first
+        if (!isRetrySafeCommand(command)) {
+            XLog.i(TAG, "Local ADB auto-reconnected; skipping retry for non-idempotent command: $command")
+            return first
+        }
+        XLog.i(TAG, "Local ADB auto-reconnected; retrying command once: $command")
         return exec(command, timeoutMs, logFailure = true)
     }
 
     private fun exec(command: String, timeoutMs: Long = 15_000L, logFailure: Boolean): ShellCommandResult {
-        val kadb = synchronized(lock) {
-            ensureIdentityLocked()
-            ensureClientLocked(timeoutMs)
-        } ?: return ShellCommandResult(
-            -1,
-            false,
-            "",
-            "Local ADB is not configured. Enable Wireless debugging, pair BQAAgent, then enter the connect port.",
-        )
+        var acquisitionError: String? = null
+        val kadb: Kadb? = try {
+            synchronized(lock) {
+                ensureIdentityLocked()
+                ensureClientLocked(timeoutMs)
+            }
+        } catch (e: Throwable) {
+            acquisitionError = e.message ?: e.toString()
+            resetClient()
+            markFailed()
+            if (logFailure) {
+                XLog.w(TAG, "Local ADB connection could not be established for: $command", e)
+            }
+            null
+        }
+        if (kadb == null) {
+            return ShellCommandResult(
+                -1,
+                false,
+                "",
+                acquisitionError
+                    ?: "Local ADB is not configured. Enable Wireless debugging, pair BQAAgent, then enter the connect port.",
+            )
+        }
 
         return try {
             val response = kadb.shell(command)
@@ -177,6 +217,7 @@ object LocalAdbAutomation {
             )
         } catch (e: Throwable) {
             resetClient()
+            markFailed()
             if (logFailure) {
                 XLog.w(TAG, "Local ADB command failed: $command", e)
             }
@@ -208,7 +249,7 @@ object LocalAdbAutomation {
             KVUtils.setLocalAdbPaired(true)
             markReady()
         } else if (!result.isSuccess) {
-            lastFailedProbeAt = System.currentTimeMillis()
+            markFailed()
         }
         return result
     }
@@ -638,8 +679,80 @@ object LocalAdbAutomation {
         lastReadyAt = System.currentTimeMillis()
     }
 
+    private fun markFailed() {
+        lastFailedProbeAt = System.currentTimeMillis()
+        lastReadyAt = 0L
+    }
+
     private fun hasSavedIdentity(): Boolean {
         return KVUtils.getLocalAdbCert() != null && KVUtils.getLocalAdbPrivateKey() != null
+    }
+
+    private fun isTransportFailure(result: ShellCommandResult): Boolean {
+        return result.exitCode == -1 && !result.timedOut
+    }
+
+    private fun isRetrySafeCommand(command: String): Boolean {
+        return command
+            .split("&&", ";", "|", "\n")
+            .none { segment -> NON_RETRYABLE_COMMAND_PREFIXES.any { verb -> segment.trim().startsWith(verb) } }
+    }
+
+    /**
+     * Best-effort self-heal for the common "idle disconnect" and "port drift" cases: re-run mDNS
+     * discovery for the connect port and re-establish the client through the exact same
+     * configureConnection path the manual "reconnect saved pairing" entry uses. Guarded by a
+     * single-flight CAS and a cooldown so heartbeat/exec failure paths never storm NSD or KV.
+     */
+    private fun attemptRediscoverAndReconnect(): Boolean {
+        val context = appContext ?: return false
+        if (!hasRememberedPairing()) return false
+        if (!rediscoveryRunning.compareAndSet(false, true)) return false
+        try {
+            val now = System.currentTimeMillis()
+            if (now - lastRediscoverAt < REDISCOVER_COOLDOWN_MS) return false
+            lastRediscoverAt = now
+            val discovery = LocalAdbDiscovery.discoverBlocking(context, REDISCOVER_DISCOVERY_TIMEOUT_MS)
+            val connectPort = discovery.connectPort ?: return false
+            val connectHost = discovery.connectHost ?: discovery.host.ifBlank { DEFAULT_HOST }
+            val result = configureConnection(connectHost, connectPort, logFailure = false)
+            if (result.isSuccess) {
+                XLog.i(TAG, "Local ADB auto-reconnect succeeded host=$connectHost port=$connectPort")
+                return true
+            }
+            XLog.w(TAG, "Local ADB auto-reconnect failed host=$connectHost port=$connectPort: ${result.combinedOutput}")
+            return false
+        } catch (e: Throwable) {
+            XLog.w(TAG, "Local ADB auto-reconnect threw", e)
+            return false
+        } finally {
+            rediscoveryRunning.set(false)
+        }
+    }
+
+    /**
+     * Keeps the ready cache fresh so UI surfaces stop flapping between "Not ready" and "Ready",
+     * and lets idle socket drops self-heal before the user notices. Backs off after consecutive
+     * failures to stay battery-friendly; Doze naturally freezes the loop in deep sleep, which is
+     * fine because the recovery path (auto rediscover) also runs on-demand from exec/isReady.
+     */
+    private fun startHeartbeat() {
+        if (!heartbeatStarted.compareAndSet(false, true)) return
+        probeScope.launch {
+            XLog.i(TAG, "Local ADB heartbeat started")
+            var consecutiveFailures = 0
+            while (isActive) {
+                val interval = if (consecutiveFailures >= HEARTBEAT_BACKOFF_THRESHOLD) {
+                    HEARTBEAT_SLOW_INTERVAL_MS
+                } else {
+                    HEARTBEAT_INTERVAL_MS
+                }
+                delay(interval)
+                if (!hasConnectionConfig()) continue
+                val ready = runCatching { awaitReady(5_000L) }.getOrDefault(false)
+                consecutiveFailures = if (ready) 0 else consecutiveFailures + 1
+            }
+        }
     }
 
     private fun parseHostPort(value: String): Pair<String, Int>? {
@@ -661,4 +774,20 @@ object LocalAdbAutomation {
             "$prefix: $message; cause=$cause"
         }
     }
+
+    private val NON_RETRYABLE_COMMAND_PREFIXES = listOf(
+        "input ",
+        "monkey ",
+        "am start",
+        "am force-stop",
+        "screenrecord",
+        "settings put",
+        "settings delete",
+        "settings secure",
+        "pm ",
+        "ime ",
+        "svc ",
+        "wm ",
+        "rm ",
+    )
 }

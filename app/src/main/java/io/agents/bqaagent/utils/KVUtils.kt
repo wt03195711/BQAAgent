@@ -156,10 +156,20 @@ object KVUtils {
     fun isVoiceInputEnabled(): Boolean = getBoolean(KEY_VOICE_INPUT_ENABLED, false)
     fun setVoiceInputEnabled(enabled: Boolean) = putBoolean(KEY_VOICE_INPUT_ENABLED, enabled)
 
-    // ==================== Sensitive Mode ====================
-    private const val KEY_SENSITIVE_MODE_ENABLED = "KEY_SENSITIVE_MODE_ENABLED"
-    fun isSensitiveModeEnabled(): Boolean = getBoolean(KEY_SENSITIVE_MODE_ENABLED, true)
-    fun setSensitiveModeEnabled(enabled: Boolean) = putBoolean(KEY_SENSITIVE_MODE_ENABLED, enabled)
+    // ==================== Floating Window ====================
+    // Feature toggle, independent of the system "display over other apps" permission.
+    // Default OFF: opt-in. When ON the bubble shows persistently (on toggle and on app start);
+    // the task lifecycle only changes its STATE (idle/running/success…), it never hides it.
+    private const val KEY_FLOATING_WINDOW_ENABLED = "KEY_FLOATING_WINDOW_ENABLED"
+    fun isFloatingWindowEnabled(): Boolean = getBoolean(KEY_FLOATING_WINDOW_ENABLED, false)
+    fun setFloatingWindowEnabled(enabled: Boolean) = putBoolean(KEY_FLOATING_WINDOW_ENABLED, enabled)
+
+    // ==================== Sensitive Confirm Mode ====================
+    // When enabled, high-risk steps (payments, passwords) are detected during task execution
+    // and require explicit user confirmation (30s timeout) before the tool runs. Default OFF.
+    private const val KEY_SENSITIVE_CONFIRM_ENABLED = "KEY_SENSITIVE_CONFIRM_ENABLED"
+    fun isSensitiveConfirmEnabled(): Boolean = getBoolean(KEY_SENSITIVE_CONFIRM_ENABLED, false)
+    fun setSensitiveConfirmEnabled(enabled: Boolean) = putBoolean(KEY_SENSITIVE_CONFIRM_ENABLED, enabled)
 
     // ==================== Skill Capture Mode ====================
     private const val KEY_SKILL_CAPTURE_MODE_ENABLED = "KEY_SKILL_CAPTURE_MODE_ENABLED"
@@ -173,6 +183,17 @@ object KVUtils {
     private const val KEY_LLM_SKILL_MATCHING_ENABLED = "KEY_LLM_SKILL_MATCHING_ENABLED"
     fun isLlmSkillMatchingEnabled(): Boolean = getBoolean(KEY_LLM_SKILL_MATCHING_ENABLED, false)
     fun setLlmSkillMatchingEnabled(enabled: Boolean) = putBoolean(KEY_LLM_SKILL_MATCHING_ENABLED, enabled)
+
+    // ==================== Batch UI Mode ====================
+    // Remembers which top-level screen (chat / batch) was showing on last exit so a cold start
+    // restores the same screen. Mirrors the existing CURRENT_CONVERSATION_ID pattern in
+    // ConversationStore — pure KV, no schema involvement.
+    private const val KEY_LAST_UI_MODE = "KEY_LAST_UI_MODE"
+    private const val KEY_LAST_BATCH_CONVERSATION_ID = "KEY_LAST_BATCH_CONVERSATION_ID"
+
+    /** "chat" or "batch"; defaults to chat for existing users. */
+    fun getLastUiMode(): String = getString(KEY_LAST_UI_MODE, "chat")
+    fun setLastUiMode(mode: String) = putString(KEY_LAST_UI_MODE, mode)
 
     // ==================== Task Recording ====================
     // Master switch, default OFF. While off, TaskRecordingCoordinator never touches the device.
@@ -189,7 +210,8 @@ object KVUtils {
     // phone survives a backup restore onto another, and TaskRecordingCoordinator.doStart() only
     // re-probes when the cache is blank — so the foreign value would be used forever unvalidated.
     private const val KEY_TASK_RECORDING_VERIFIED_DEVICE = "KEY_TASK_RECORDING_VERIFIED_DEVICE"
-    private const val KEY_TASK_RECORDING_VERIFIED_AT = "KEY_TASK_RECORDING_VERIFIED_AT"
+    private const val KEY_TASK_RECORDING_VERIFIED_AT = "TASK_RECORDING_VERIFIED_AT"
+    private const val KEY_PERM_ADVANCED_EXPANDED = "PERM_ADVANCED_EXPANDED"
 
     fun isTaskRecordingEnabled(): Boolean = getBoolean(KEY_TASK_RECORDING_ENABLED, false)
     fun setTaskRecordingEnabled(enabled: Boolean) = putBoolean(KEY_TASK_RECORDING_ENABLED, enabled)
@@ -207,6 +229,21 @@ object KVUtils {
     fun setTaskRecordingVerifiedDevice(value: String) = putString(KEY_TASK_RECORDING_VERIFIED_DEVICE, value)
     fun getTaskRecordingVerifiedAt(): Long = getLong(KEY_TASK_RECORDING_VERIFIED_AT, 0L)
     fun setTaskRecordingVerifiedAt(value: Long) = putLong(KEY_TASK_RECORDING_VERIFIED_AT, value)
+
+    /** Permissions "Advanced" section — global remember of the user's expand choice. */
+    fun isPermAdvancedExpanded(): Boolean = getBoolean(KEY_PERM_ADVANCED_EXPANDED, false)
+
+    fun setPermAdvancedExpanded(expanded: Boolean) = putBoolean(KEY_PERM_ADVANCED_EXPANDED, expanded)
+
+    // ==================== Collapsible section states (General group etc.) ===================
+    private const val KEY_SECTION_EXPANDED_PREFIX = "KEY_SECTION_EXPANDED_"
+
+    fun isSectionExpanded(sectionId: String): Boolean =
+        getBoolean(KEY_SECTION_EXPANDED_PREFIX + sectionId, false)
+
+    fun setSectionExpanded(sectionId: String, expanded: Boolean) =
+        putBoolean(KEY_SECTION_EXPANDED_PREFIX + sectionId, expanded)
+
     fun clearTaskRecordingVerification() =
         remove(KEY_TASK_RECORDING_VERIFIED_DEVICE, KEY_TASK_RECORDING_VERIFIED_AT)
 
@@ -260,6 +297,42 @@ object KVUtils {
         putBoolean(KEY_PENDING_NOTIFICATION_ACCESS_RETURN, false)
         putLong(KEY_PENDING_NOTIFICATION_ACCESS_RETURN_AT, 0L)
     }
+
+    // Set together with markPendingNotificationAccessReturn() when the Notification Access
+    // jump originates from the chat monitor guide, so the listener returns the user to the
+    // chat screen instead of Settings after granting. Consumed exactly once per return flow.
+    private const val KEY_PENDING_NOTIFICATION_ACCESS_RETURN_TO_CHAT = "KEY_PENDING_NOTIFICATION_ACCESS_RETURN_TO_CHAT"
+
+    fun markPendingNotificationAccessReturnToChat() =
+        putBoolean(KEY_PENDING_NOTIFICATION_ACCESS_RETURN_TO_CHAT, true)
+
+    fun consumePendingNotificationAccessReturnToChat(): Boolean {
+        val toChat = getBoolean(KEY_PENDING_NOTIFICATION_ACCESS_RETURN_TO_CHAT, false)
+        putBoolean(KEY_PENDING_NOTIFICATION_ACCESS_RETURN_TO_CHAT, false)
+        return toChat
+    }
+
+    // ==================== Guide prompt anti-spam ====================
+    // Per-touchpoint 24h dedupe for PROACTIVE permission prompts (e.g. auto-jumping to the
+    // overlay settings when the floating-window switch is on but the permission is missing).
+    // Explicit user taps (Start monitoring, tapping a permission row) must never be gated here.
+    private const val KEY_GUIDE_PROMPT_PREFIX = "KEY_GUIDE_PROMPT_SHOWN_AT_"
+
+    fun shouldShowGuidePrompt(key: String, windowMs: Long = 24L * 60L * 60L * 1000L): Boolean {
+        val lastShownAt = getLong(KEY_GUIDE_PROMPT_PREFIX + key, 0L)
+        return lastShownAt <= 0L || System.currentTimeMillis() - lastShownAt > windowMs
+    }
+
+    fun markGuidePromptShown(key: String) =
+        putLong(KEY_GUIDE_PROMPT_PREFIX + key, System.currentTimeMillis())
+
+    // First-time POST_NOTIFICATIONS request also reports shouldShowRequestPermissionRationale
+    // == false, so a "have we asked" flag is the only reliable way to detect a permanent denial.
+    private const val KEY_NOTIF_PERM_ASKED = "KEY_NOTIF_PERM_ASKED"
+
+    fun isNotifPermAskedBefore(): Boolean = getBoolean(KEY_NOTIF_PERM_ASKED, false)
+
+    fun markNotifPermAsked() = putBoolean(KEY_NOTIF_PERM_ASKED, true)
 
     fun noteNotificationListenerConnected() {
         putLong(KEY_NOTIFICATION_LISTENER_LAST_CONNECTED_AT, System.currentTimeMillis())
@@ -397,4 +470,23 @@ object KVUtils {
     /** Returns true if LLM is configured (API key, base URL, or local model path is non-empty) */
     fun hasLlmConfig(): Boolean =
         getLlmApiKey().isNotEmpty() || getLlmBaseUrl().isNotEmpty() || getLocalModelPath().isNotEmpty()
+
+    // ==================== Multi-Profile Storage ====================
+
+    private const val KEY_LLM_PROFILES_JSON = "KEY_LLM_PROFILES_JSON"
+    private const val KEY_ACTIVE_LLM_PROFILE_ID = "KEY_ACTIVE_LLM_PROFILE_ID"
+    private const val KEY_VLM_PROFILES_JSON = "KEY_VLM_PROFILES_JSON"
+    private const val KEY_ACTIVE_VLM_PROFILE_ID = "KEY_ACTIVE_VLM_PROFILE_ID"
+
+    fun getLlmProfilesJson(): String = getString(KEY_LLM_PROFILES_JSON, "[]")
+    fun setLlmProfilesJson(value: String) = putString(KEY_LLM_PROFILES_JSON, value)
+
+    fun getActiveLlmProfileId(): String = getString(KEY_ACTIVE_LLM_PROFILE_ID, "")
+    fun setActiveLlmProfileId(value: String) = putString(KEY_ACTIVE_LLM_PROFILE_ID, value)
+
+    fun getVlmProfilesJson(): String = getString(KEY_VLM_PROFILES_JSON, "[]")
+    fun setVlmProfilesJson(value: String) = putString(KEY_VLM_PROFILES_JSON, value)
+
+    fun getActiveVlmProfileId(): String = getString(KEY_ACTIVE_VLM_PROFILE_ID, "")
+    fun setActiveVlmProfileId(value: String) = putString(KEY_ACTIVE_VLM_PROFILE_ID, value)
 }

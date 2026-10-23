@@ -95,6 +95,19 @@ data class ResolvedModelConfig(
  */
 object ModelConfigRepository {
 
+    /**
+     * Neutral "no cloud" placeholder. snapshot() substitutes this for activeCloud /
+     * defaultCloud whenever runtime KV holds no real cloud config, so the hardcoded
+     * CustomCloudDefaults asset/fallback can never revive a model the user disabled
+     * or never enabled.
+     */
+    private val EMPTY_CLOUD = CloudModelConfig(
+        providerName = CloudProvider.DEEPSEEK.name,
+        modelName = "",
+        baseUrl = "",
+        apiKey = ""
+    )
+
     fun snapshot(): ResolvedModelConfig {
         val activeProviderRaw = KVUtils.getLlmProvider().ifBlank { "DEEPSEEK" }.uppercase()
         val activeMode = if (activeProviderRaw == "LOCAL") ActiveModelMode.LOCAL else ActiveModelMode.CLOUD
@@ -153,12 +166,42 @@ object ModelConfigRepository {
         }
         val activeCloud = buildCloudConfig(activeCloudProvider, activeCloudModel, activeCloudBaseUrl)
 
+        // Gate the CustomCloudDefaults revival: only surface cloud config when the
+        // runtime KV actually holds a model + API key (i.e. a profile is enabled).
+        // Otherwise every consumer (settings, chat switcher, agent, batch) must see
+        // "not configured" instead of a stale / hardcoded fallback model.
+        val cloudConfigured = hasRuntimeCloudConfig()
         return ResolvedModelConfig(
             activeMode = activeMode,
             local = local,
-            activeCloud = activeCloud,
-            defaultCloud = defaultCloud
+            activeCloud = if (cloudConfigured) activeCloud else EMPTY_CLOUD,
+            defaultCloud = if (cloudConfigured) defaultCloud else EMPTY_CLOUD
         )
+    }
+
+    /**
+     * True when runtime KV holds a real cloud model + API key, independent of the
+     * CustomCloudDefaults asset/fallback revival. Mirrors snapshot()'s own KV fallbacks
+     * (defaultCloudModel -> llmModelName, provider key -> llmApiKey) so legacy
+     * single-slot configs still count as configured and migrate correctly.
+     */
+    private fun hasRuntimeCloudConfig(): Boolean {
+        val provider = normalizeCloudProvider(
+            KVUtils.getDefaultCloudProvider().ifBlank { KVUtils.getLlmProvider() }
+        )
+        val model = KVUtils.getDefaultCloudModel().ifBlank { KVUtils.getLlmModelName() }
+        val apiKey = KVUtils.getApiKeyForProvider(provider).ifEmpty { KVUtils.getLlmApiKey() }
+        return model.isNotBlank() && apiKey.isNotBlank()
+    }
+
+    /**
+     * Authoritative "can a task actually run right now" check for the send / batch /
+     * init gates. LOCAL needs a selected local model; CLOUD needs a configured
+     * (non-revived) active cloud model.
+     */
+    fun hasUsableModel(): Boolean {
+        val s = snapshot()
+        return if (s.isLocalActive()) s.local.isConfigured else s.activeCloud.isConfigured
     }
 
     fun isLocalActive(): Boolean = snapshot().isLocalActive()
@@ -280,5 +323,33 @@ object ModelConfigRepository {
         val provider = CloudProvider.fromName(providerName)
         if (provider == CloudProvider.CUSTOM) return baseUrl.trim().ifBlank { CustomCloudDefaults.baseUrl() }
         return provider.defaultBaseUrl
+    }
+
+    fun clearLocalDefault() {
+        KVUtils.setLocalModelPath("")
+        if (isLocalActive()) {
+            KVUtils.setLlmProvider(CloudProvider.DEEPSEEK.name)
+        }
+    }
+
+    /**
+     * Clears the active cloud configuration entirely. Used when the user
+     * disables the currently-enabled cloud profile, so that Default Models
+     * shows "not configured" and downstream gates (hasLlmConfig) reflect it.
+     */
+    fun clearCloudConfig() {
+        val provider = KVUtils.getDefaultCloudProvider().ifEmpty { CloudProvider.CUSTOM.name }
+        KVUtils.setApiKeyForProvider(provider, "")
+        KVUtils.setApiKeyForProvider(CloudProvider.CUSTOM.name, "")
+        KVUtils.setDefaultCloudModel("")
+        KVUtils.setDefaultCloudBaseUrl("")
+        KVUtils.setLlmApiKey("")
+        KVUtils.setLlmBaseUrl("")
+        KVUtils.setLlmModelName("")
+        // If cloud was the active mode, fall back to local when a local model exists,
+        // otherwise leave mode as-is; effective cloud is now unconfigured.
+        if (!isLocalActive() && KVUtils.getLocalModelPath().isNotEmpty()) {
+            KVUtils.setLlmProvider("LOCAL")
+        }
     }
 }

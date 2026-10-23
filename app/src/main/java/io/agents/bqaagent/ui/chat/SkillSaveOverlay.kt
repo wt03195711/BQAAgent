@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -46,6 +47,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.agents.bqaagent.R
 import io.agents.bqaagent.agent.skill.RecordedSkillStep
 import io.agents.bqaagent.agent.skill.SkillDefinition
 import io.agents.bqaagent.agent.skill.SkillReplayer
@@ -175,7 +177,7 @@ private fun OfferSaveContent(
     if (matchedSkill != null) {
         val isTemplateUpdate = saveData.degradedTemplateId != null
         Text(
-            text = if (isTemplateUpdate) "Update template?" else "Learn new template?",
+            text = if (isTemplateUpdate) stringResource(R.string.skill_save_update_template_title) else stringResource(R.string.skill_save_learn_template_title),
             color = colors.textPrimary,
             fontSize = 18.sp,
             fontWeight = FontWeight.Bold
@@ -183,32 +185,30 @@ private fun OfferSaveContent(
         Spacer(Modifier.height(12.dp))
         Text(
             text = if (isTemplateUpdate) {
-                "This task re-ran skill \"${matchedSkill.title}\" with the AI agent. " +
-                        "Review the recorded steps and save them to update its execution template."
+                stringResource(R.string.skill_save_update_template_desc, matchedSkill.title)
             } else {
-                "This task matched the existing skill \"${matchedSkill.title}\". " +
-                        "Review the recorded steps and save them as a new execution template for it."
+                stringResource(R.string.skill_save_match_template_desc, matchedSkill.title)
             },
             color = colors.textSecondary,
             fontSize = 14.sp
         )
     } else {
         Text(
-            text = "Save as Skill?",
+            text = stringResource(R.string.skill_save_offer_title),
             color = colors.textPrimary,
             fontSize = 18.sp,
             fontWeight = FontWeight.Bold
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            text = "This task was completed by the AI agent. Save it as a reusable Skill so it can run faster next time.",
+            text = stringResource(R.string.skill_save_offer_desc),
             color = colors.textSecondary,
             fontSize = 14.sp
         )
     }
     Spacer(Modifier.height(8.dp))
     Text(
-        text = "Task: ${saveData.originalTaskText}",
+        text = stringResource(R.string.skill_save_task_label, saveData.originalTaskText),
         color = colors.textTertiary,
         fontSize = 13.sp
     )
@@ -218,14 +218,14 @@ private fun OfferSaveContent(
         horizontalArrangement = Arrangement.End
     ) {
         OutlinedButton(onClick = onDismiss) {
-            Text("Not now")
+            Text(stringResource(R.string.skill_save_not_now))
         }
         Spacer(Modifier.width(12.dp))
         Button(
             onClick = onSave,
             colors = ButtonDefaults.buttonColors(containerColor = colors.accent)
         ) {
-            Text(if (matchedSkill != null) "Review Template" else "Save as Skill")
+            Text(if (matchedSkill != null) stringResource(R.string.skill_save_review_template) else stringResource(R.string.skill_save_as_skill))
         }
     }
 }
@@ -265,7 +265,7 @@ private fun ShowDetailCard(
                 ScenarioChip(isTemplateMode, colors)
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    text = if (isTemplateMode) "Confirm Template" else "Confirm Skill",
+                    text = if (isTemplateMode) stringResource(R.string.skill_save_confirm_template_title) else stringResource(R.string.skill_save_confirm_skill_title),
                     color = colors.textPrimary,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold
@@ -292,7 +292,7 @@ private fun ShowDetailCard(
                             onTitleChanged(newTitle)
                         }
                     },
-                    label = { Text("Skill title (editable)") },
+                    label = { Text(stringResource(R.string.skill_save_title_label)) },
                     singleLine = true,
                     supportingText = {
                         Text("${state.editableTitle.length}/${SkillDefinition.SKILL_TITLE_MAX_LENGTH}")
@@ -313,7 +313,7 @@ private fun ShowDetailCard(
             Spacer(Modifier.height(12.dp))
 
             Text(
-                text = "Steps (${steps.size}) · review before save",
+                text = stringResource(R.string.skill_save_steps_review, steps.size),
                 color = colors.textTertiary,
                 fontSize = 12.sp
             )
@@ -330,7 +330,7 @@ private fun ShowDetailCard(
                 horizontalArrangement = Arrangement.End
             ) {
                 OutlinedButton(onClick = onCancel) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.common_cancel))
                 }
                 Spacer(Modifier.width(12.dp))
                 Button(
@@ -338,7 +338,7 @@ private fun ShowDetailCard(
                     enabled = isTemplateMode || state.editableTitle.isNotBlank(),
                     colors = ButtonDefaults.buttonColors(containerColor = colors.accent)
                 ) {
-                    Text(if (isTemplateMode) "Confirm & Save Template" else "Confirm & Save Skill")
+                    Text(if (isTemplateMode) stringResource(R.string.skill_save_confirm_save_template) else stringResource(R.string.skill_save_confirm_save_skill))
                 }
             }
         }
@@ -424,7 +424,7 @@ private fun StepTimelineItem(
         Column(modifier = Modifier.padding(bottom = 8.dp)) {
             val intent = step.intent.orEmpty().trim()
             val intentLine = when {
-                row.isSameIntentAsPrevious -> "(same as above)"
+                row.isSameIntentAsPrevious -> stringResource(R.string.skill_save_same_as_above)
                 intent.isNotBlank() -> intent
                 else -> {
                     val target = step.targetText.trim()
@@ -539,7 +539,7 @@ private fun ScenarioChip(isTemplateMode: Boolean, colors: PokeclawColors) {
             .padding(horizontal = 8.dp, vertical = 3.dp)
     ) {
         Text(
-            text = if (isTemplateMode) "New Template" else "New Skill",
+            text = if (isTemplateMode) stringResource(R.string.skill_save_chip_new_template) else stringResource(R.string.skill_save_chip_new_skill),
             color = Color.White,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold
@@ -559,7 +559,7 @@ private fun SavingContent(isTemplateOnly: Boolean, colors: PokeclawColors) {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-            text = if (isTemplateOnly) "Saving Template..." else "Saving Skill...",
+            text = if (isTemplateOnly) stringResource(R.string.skill_save_saving_template) else stringResource(R.string.skill_save_saving_skill),
             color = colors.textSecondary,
             fontSize = 14.sp
         )
@@ -573,14 +573,14 @@ private fun SuccessContent(title: String, isTemplateOnly: Boolean, colors: Pokec
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = if (isTemplateOnly) "✅ Template saved" else "✅ Skill saved",
+            text = if (isTemplateOnly) stringResource(R.string.skill_save_success_template) else stringResource(R.string.skill_save_success_skill),
             color = colors.textPrimary,
             fontSize = 16.sp,
             fontWeight = FontWeight.Bold
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = if (isTemplateOnly) "New template added to \"$title\"" else "Saved as: $title",
+            text = if (isTemplateOnly) stringResource(R.string.skill_save_success_template_desc, title) else stringResource(R.string.skill_save_success_skill_desc, title),
             color = colors.textSecondary,
             fontSize = 14.sp,
             textAlign = TextAlign.Center
@@ -596,7 +596,7 @@ private fun FailContent(
     onCancel: () -> Unit,
 ) {
     Text(
-        text = "❌ Save failed",
+        text = stringResource(R.string.skill_save_fail_title),
         color = colors.textPrimary,
         fontSize = 16.sp,
         fontWeight = FontWeight.Bold
@@ -613,14 +613,14 @@ private fun FailContent(
         horizontalArrangement = Arrangement.End
     ) {
         OutlinedButton(onClick = onCancel) {
-            Text("Cancel")
+            Text(stringResource(R.string.common_cancel))
         }
         Spacer(Modifier.width(12.dp))
         Button(
             onClick = onRetry,
             colors = ButtonDefaults.buttonColors(containerColor = colors.accent)
         ) {
-            Text("Retry")
+            Text(stringResource(R.string.skill_save_retry))
         }
     }
 }
@@ -634,16 +634,14 @@ private fun SkillLimitReachedContent(
     onCancel: () -> Unit,
 ) {
     Text(
-        text = "🗂️ Skill limit reached",
+        text = stringResource(R.string.skill_limit_title),
         color = colors.textPrimary,
         fontSize = 16.sp,
         fontWeight = FontWeight.Bold
     )
     Spacer(Modifier.height(8.dp))
     Text(
-        text = "You've saved $currentCount of $maxCount Skills — the limit is reached, " +
-                "so this task can't be saved as a new Skill yet.\n\n" +
-                "Delete a Skill you no longer need in Skill Management, then come back and tap Save again. ",
+        text = stringResource(R.string.skill_limit_message, currentCount, maxCount),
         color = colors.textSecondary,
         fontSize = 14.sp
     )
@@ -653,14 +651,14 @@ private fun SkillLimitReachedContent(
         horizontalArrangement = Arrangement.End
     ) {
         OutlinedButton(onClick = onCancel) {
-            Text("Cancel")
+            Text(stringResource(R.string.common_cancel))
         }
         Spacer(Modifier.width(12.dp))
         Button(
             onClick = onOpenSkillManagement,
             colors = ButtonDefaults.buttonColors(containerColor = colors.accent)
         ) {
-            Text("Open Skill Management")
+            Text(stringResource(R.string.skill_limit_open_management))
         }
     }
 }
@@ -701,7 +699,7 @@ private fun ReplayConfirmCard(
                 ReplayChip(colors)
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    text = "Confirm Replay",
+                    text = stringResource(R.string.skill_replay_confirm_title),
                     color = colors.textPrimary,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold
@@ -723,9 +721,9 @@ private fun ReplayConfirmCard(
 
             Text(
                 text = if (substitutionsByStep.isEmpty()) {
-                    "Steps (${template.steps.size}) · recorded template"
+                    stringResource(R.string.skill_replay_steps_recorded, template.steps.size)
                 } else {
-                    "Steps (${template.steps.size}) · values in red are replaced for this run"
+                    stringResource(R.string.skill_replay_steps_substituted, template.steps.size)
                 },
                 color = colors.textTertiary,
                 fontSize = 12.sp
@@ -748,14 +746,14 @@ private fun ReplayConfirmCard(
                 horizontalArrangement = Arrangement.End
             ) {
                 OutlinedButton(onClick = onCancel) {
-                    Text("Use AI Instead")
+                    Text(stringResource(R.string.skill_replay_use_ai))
                 }
                 Spacer(Modifier.width(12.dp))
                 Button(
                     onClick = onConfirm,
                     colors = ButtonDefaults.buttonColors(containerColor = colors.accent)
                 ) {
-                    Text("Confirm & Replay")
+                    Text(stringResource(R.string.skill_replay_confirm_button))
                 }
             }
         }
@@ -770,10 +768,116 @@ private fun ReplayChip(colors: PokeclawColors) {
             .padding(horizontal = 8.dp, vertical = 3.dp)
     ) {
         Text(
-            text = "Replay",
+            text = stringResource(R.string.skill_replay_chip),
             color = Color.White,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold
         )
+    }
+}
+
+/**
+ * Read-only skill preview reused by the batch "Add from Skill library" picker so the user can inspect
+ * a skill before adding it. Renders the title, optional task description, and — when [template] is
+ * non-null — the recorded steps timeline (chip + steps + substitution highlights) by reusing the very
+ * same private helpers as [ReplayConfirmCard]. When [template] is null the steps area is replaced by a
+ * "no template" hint, so one component serves both the with-template and without-template cases.
+ * [showReplayChip] hides the "Replay" badge for the batch picker (adding a task is not a replay).
+ * [extractedParams] defaults to empty (a plain recorded-template preview with no red substitutions).
+ * [taskDescription] (when non-blank) renders the skill's original task text above the steps.
+ */
+@Composable
+fun SkillReplayPreviewCard(
+    skill: SkillDefinition,
+    template: ExecutionTemplate?,
+    colors: PokeclawColors,
+    onBack: () -> Unit,
+    extractedParams: Map<String, String> = emptyMap(),
+    modifier: Modifier = Modifier,
+    taskDescription: String? = null,
+    showReplayChip: Boolean = true,
+) {
+    val rows = remember(template) {
+        template?.steps?.mapIndexed { index, step ->
+            val intent = step.intent.orEmpty().trim()
+            val prevIntent = if (index > 0) template.steps[index - 1].intent.orEmpty().trim() else ""
+            StepDisplayRow(step, intent.isNotBlank() && intent == prevIntent)
+        } ?: emptyList()
+    }
+    val substitutionsByStep = remember(template, extractedParams) {
+        if (template != null) SkillReplayer.buildDisplaySubstitutionPlan(template, extractedParams) else emptyMap()
+    }
+    val configuration = LocalConfiguration.current
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(max = configuration.screenHeightDp.dp * 0.8f)
+            .background(colors.surface, RoundedCornerShape(16.dp))
+            .padding(20.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (showReplayChip) {
+                ReplayChip(colors)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(
+                text = skill.title,
+                color = colors.textPrimary,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        if (!taskDescription.isNullOrBlank()) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = stringResource(R.string.skill_replay_task_description),
+                color = colors.textTertiary,
+                fontSize = 12.sp
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = taskDescription,
+                color = colors.textSecondary,
+                fontSize = 13.sp
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        if (template != null) {
+            Text(
+                text = if (substitutionsByStep.isEmpty()) {
+                    stringResource(R.string.skill_replay_steps_recorded, template.steps.size)
+                } else {
+                    stringResource(R.string.skill_replay_steps_substituted, template.steps.size)
+                },
+                color = colors.textTertiary,
+                fontSize = 12.sp
+            )
+            Spacer(Modifier.height(6.dp))
+            LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
+                itemsIndexed(rows) { index, row ->
+                    StepTimelineItem(
+                        row = row,
+                        isLast = index == rows.lastIndex,
+                        colors = colors,
+                        substitutions = substitutionsByStep[row.step.stepIndex] ?: emptyList()
+                    )
+                }
+            }
+        } else {
+            Text(
+                text = stringResource(R.string.batch_skill_no_template),
+                color = Color(0xFFFFB300),
+                fontSize = 12.sp
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            OutlinedButton(onClick = onBack) {
+                Text(stringResource(R.string.common_back))
+            }
+        }
     }
 }

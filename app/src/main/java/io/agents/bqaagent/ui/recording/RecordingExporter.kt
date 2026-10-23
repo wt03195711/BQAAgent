@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import io.agents.bqaagent.utils.XLog
 import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 
 /**
@@ -36,6 +37,9 @@ object RecordingExporter {
 
     private const val TAG = "RecordingExporter"
     private const val GALLERY_DIR = "BQAAgent"
+
+    /** Seconds between 1904-01-01 (MP4 epoch) and 1970-01-01 (Unix epoch). */
+    private const val MP4_EPOCH_OFFSET = 2082844800L
 
     /** Sample copy buffer for the lossless merge; screenrecord frames are well under 1MB. */
     private const val MERGE_BUFFER_BYTES = 1024 * 1024
@@ -236,6 +240,11 @@ object RecordingExporter {
 
     private fun copyOne(resolver: ContentResolver, source: File, displayName: String): Uri {
         val scoped = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        val nowMs = System.currentTimeMillis()
+        val nowSec = nowMs / 1000
+
+        val patched = patchMp4CreationTime(source, nowSec)
+
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
@@ -253,18 +262,93 @@ object RecordingExporter {
             ?: throw IOException("MediaStore.insert returned null")
         try {
             val out = resolver.openOutputStream(uri) ?: throw IOException("openOutputStream returned null")
-            out.use { sink -> source.inputStream().use { it.copyTo(sink) } }
+            out.use { sink -> patched.inputStream().use { it.copyTo(sink) } }
+            values.clear()
+            values.put(MediaStore.Video.Media.DATE_TAKEN, nowMs)
             if (scoped) {
-                values.clear()
                 values.put(MediaStore.Video.Media.IS_PENDING, 0)
-                resolver.update(uri, values, null, null)
             }
+            resolver.update(uri, values, null, null)
         } catch (e: Throwable) {
-            // Never leave a half-written, permanently "pending" row behind in the gallery.
             runCatching { resolver.delete(uri, null, null) }
             throw e
+        } finally {
+            if (patched != source) runCatching { patched.delete() }
         }
         return uri
+    }
+
+    /**
+     * Patches the MP4 mvhd atom's creation/modification time to [nowSec] (Unix seconds).
+     * MediaScanner reads this field to populate DATE_TAKEN; without patching, it picks up the
+     * original recording timestamp and overrides whatever we set via ContentValues.
+     *
+     * Returns a patched temp copy, or the original file if patching fails (never throws).
+     */
+    private fun patchMp4CreationTime(source: File, nowSec: Long): File {
+        return try {
+            val temp = File(
+                io.agents.bqaagent.ClawApplication.instance.cacheDir,
+                "gallery_${System.currentTimeMillis()}.mp4"
+            )
+            source.copyTo(temp, overwrite = true)
+            val mp4Time = (nowSec + MP4_EPOCH_OFFSET).toInt()
+            if (patchMvhdInFile(temp, mp4Time)) temp
+            else { temp.delete(); source }
+        } catch (e: Throwable) {
+            XLog.w(TAG, "MP4 creation time patch failed: ${e.message}")
+            source
+        }
+    }
+
+    /** Walks the MP4 box tree, finds mvhd inside moov, and overwrites creation+modification time. */
+    private fun patchMvhdInFile(file: File, mp4Time: Int): Boolean {
+        RandomAccessFile(file, "rw").use { raf ->
+            val moovOff = findBox(raf, 0, raf.length(), "moov") ?: return false
+            val moovDataOff = moovOff + 8
+            val mvhdOff = findBox(raf, moovDataOff, moovOff + readBoxSize(raf, moovOff), "mvhd")
+                ?: return false
+            raf.seek(mvhdOff + 8)
+            val version = raf.readByte().toInt() and 0xFF
+            raf.skipBytes(3)
+            if (version == 1) {
+                val timeBytes8 = ByteBuffer.allocate(8).putLong((mp4Time.toLong() and 0xFFFFFFFFL)).array()
+                raf.write(timeBytes8)
+                raf.write(timeBytes8)
+            } else {
+                val timeBytes4 = ByteBuffer.allocate(4).putInt(mp4Time).array()
+                raf.write(timeBytes4)
+                raf.write(timeBytes4)
+            }
+            return true
+        }
+    }
+
+    /** Finds a top-level box by fourCC within [start, end). Returns offset or null. */
+    private fun findBox(raf: RandomAccessFile, start: Long, end: Long, type: String): Long? {
+        var pos = start
+        while (pos + 8 <= end) {
+            raf.seek(pos)
+            var size = Integer.toUnsignedLong(raf.readInt())
+            val fourCC = ByteArray(4).also { raf.readFully(it) }.toString(Charsets.US_ASCII)
+            if (size == 1L) {
+                size = raf.readLong()
+                if (fourCC == type) return pos
+                pos += size
+            } else if (size == 0L) {
+                return if (fourCC == type) pos else null
+            } else {
+                if (fourCC == type) return pos
+                pos += size
+            }
+        }
+        return null
+    }
+
+    private fun readBoxSize(raf: RandomAccessFile, offset: Long): Long {
+        raf.seek(offset)
+        val size = Integer.toUnsignedLong(raf.readInt())
+        return if (size == 1L) { raf.seek(offset + 8); raf.readLong() } else size
     }
 
     /** MediaStore rejects /, and a task text can contain anything the user typed. */

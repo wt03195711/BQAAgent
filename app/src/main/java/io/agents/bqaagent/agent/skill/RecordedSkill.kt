@@ -14,7 +14,9 @@ data class RecordedSkillStep(
     val anchorTexts: List<String> = emptyList(),
     val nodeLocator: NodeLocator? = null,
     val targetText: String = "",
-    val intent: String? = null
+    val intent: String? = null,
+    val sensitive: Boolean = false,
+    val confirmSummary: String = ""
 )
 
 data class NodeLocator(
@@ -34,5 +36,6 @@ data class ReplayResult(
     val tokensUsed: Int = 0,
     val fallbackUsed: Boolean = false,
     val message: String = "",
-    val cancelled: Boolean = false
+    val cancelled: Boolean = false,
+    val rejected: Boolean = false
 )

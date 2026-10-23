@@ -8,7 +8,10 @@ import android.os.Bundle
 import androidx.activity.OnBackPressedCallback
 import io.agents.bqaagent.R
 import io.agents.bqaagent.base.BaseActivity
+import io.agents.bqaagent.ui.batch.BatchActivity
+import io.agents.bqaagent.ui.batch.BatchUiMode
 import io.agents.bqaagent.ui.chat.ComposeChatActivity
+import io.agents.bqaagent.utils.KVUtils
 
 /**
  * Splash screen - always navigates to the home screen; LLM does not need to be configured first, it can be set up in Settings
@@ -28,6 +31,12 @@ class SplashActivity : BaseActivity() {
         // Forward debug task extra
         getIntent()?.getStringExtra("task")?.let { intent.putExtra("task", it) }
         startActivity(intent)
+
+        // Cold-start mode restore: chat is always the base of the task; if the user last left the
+        // app in batch mode, stack BatchActivity on top so Back still returns to chat.
+        if (KVUtils.getLastUiMode() == BatchUiMode.BATCH) {
+            startActivity(Intent(this, BatchActivity::class.java))
+        }
         finish()
     }
 }

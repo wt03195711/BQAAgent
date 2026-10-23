@@ -54,7 +54,7 @@ data class AppCapabilitySnapshot(
     val localAdbStatusLabel: String
         get() = when (localAdbState) {
             ServiceBindingState.READY -> "Ready"
-            ServiceBindingState.CONNECTING -> "Not Ready"
+            ServiceBindingState.CONNECTING -> "Not ready"
             ServiceBindingState.DEGRADED -> "Disconnected"
             ServiceBindingState.DISABLED -> "Not ready"
         }
@@ -95,6 +95,20 @@ object AppCapabilityCoordinator {
         } else {
             ServiceBindingState.CONNECTING
         }
+    }
+
+    /**
+     * Authoritative BLOCKING ADB probe for surfaces that gate a hard launch on a deterministic
+     * verdict (batch precheck). Unlike [localAdbState] — a cached, non-blocking read that can
+     * transiently report CONNECTING — this actively waits up to [timeoutMs] for adbd to answer, so
+     * a healthy-but-cached device is never misreported. Returns only DISABLED / READY / DEGRADED
+     * (the wait resolves the CONNECTING transient). Centralizes the ADB truth source so every
+     * screen speaks the same ServiceBindingState vocabulary.
+     */
+    fun probeLocalAdbState(timeoutMs: Long): ServiceBindingState {
+        if (!LocalAdbAutomation.hasConnectionConfig()) return ServiceBindingState.DISABLED
+        val ready = runCatching { LocalAdbAutomation.awaitReady(timeoutMs) }.getOrDefault(false)
+        return if (ready) ServiceBindingState.READY else ServiceBindingState.DEGRADED
     }
 
     fun notificationAccessState(context: Context): ServiceBindingState {
@@ -159,6 +173,20 @@ object AppCapabilityCoordinator {
         return missing
     }
 
+    /**
+     * Requirements the monitor permission guide must satisfy before monitoring can start.
+     * Adds the notification permission on top of [missingMonitorRequirements]: ForegroundService
+     * self-stops without it, so the monitor would silently die in the background.
+     * Battery optimization is intentionally NOT included — it is advisory only in the guide.
+     */
+    fun missingMonitorGuideRequirements(context: Context): List<AppRequirement> {
+        val missing = missingMonitorRequirements(context).toMutableList()
+        if (!isNotificationPermissionGranted(context)) {
+            missing.add(AppRequirement.NOTIFICATION_PERMISSION)
+        }
+        return missing
+    }
+
     fun isNotificationPermissionGranted(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             return true
@@ -169,13 +197,22 @@ object AppCapabilityCoordinator {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
+    /**
+     * Escape hatch for a permanently denied POST_NOTIFICATIONS: the system dialog never shows
+     * again, so the only way back in is the app's notification settings page.
+     */
+    fun openAppNotificationSettings(context: Context) {
+        launch(
+            context,
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        )
+    }
+
     fun openSystemSettings(context: Context, requirement: AppRequirement) {
         when (requirement) {
             AppRequirement.LOCAL_ADB -> {
                 LocalAdbAutomation.openWirelessDebuggingSettings(context)
-                if (localAdbState(context) != ServiceBindingState.READY) {
-                    LocalAdbAutomation.openWirelessDebuggingSettings(context)
-                }
             }
             AppRequirement.NOTIFICATION_ACCESS -> {
                 if (notificationAccessState(context) == ServiceBindingState.READY) {

@@ -160,6 +160,9 @@ public class ClawNotificationListener extends NotificationListenerService {
     }
 
     private void maybeReturnToAppAfterPermissionFlow() {
+        // Read the return-target flag first: it is only meaningful together with the pending
+        // return below, and consume* clears it so a stale flag can never mis-route later flows.
+        boolean returnToChat = KVUtils.INSTANCE.consumePendingNotificationAccessReturnToChat();
         boolean pendingReturn;
         try {
             pendingReturn = KVUtils.INSTANCE.consumePendingNotificationAccessReturn(120_000L);
@@ -171,11 +174,14 @@ public class ClawNotificationListener extends NotificationListenerService {
             return;
         }
 
-        XLog.i(TAG, "Completing pending notification access return");
+        XLog.i(TAG, "Completing pending notification access return, toChat=" + returnToChat);
         Handler mainHandler = new Handler(Looper.getMainLooper());
         mainHandler.postDelayed(() -> {
             try {
-                android.content.Intent intent = new android.content.Intent(this, io.agents.bqaagent.ui.settings.SettingsActivity.class);
+                Class<?> targetActivity = returnToChat
+                        ? io.agents.bqaagent.ui.chat.ComposeChatActivity.class
+                        : io.agents.bqaagent.ui.settings.SettingsActivity.class;
+                android.content.Intent intent = new android.content.Intent(this, targetActivity);
                 intent.setFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
                         | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
                         | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP

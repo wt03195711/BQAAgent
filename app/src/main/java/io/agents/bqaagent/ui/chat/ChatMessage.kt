@@ -18,7 +18,13 @@ data class ChatMessage(
      * pure-chat replies (which render as a plain bubble with no status line/icon). Drives the
      * status header at the top of the assistant bubble.
      */
-    val taskStatus: TaskStatus? = null
+    val taskStatus: TaskStatus? = null,
+    /**
+     * Fine-grained backend reason accompanying [taskStatus] (e.g. STUCK, NEEDS_MORE_INFO). Null on
+     * chat messages and on legacy records saved before this field existed. Persisted alongside
+     * taskStatus so the batch detail view can show *why* a task failed/stopped, not just that it did.
+     */
+    val reasonCode: String? = null,
 ) {
     enum class Role { USER, ASSISTANT, SYSTEM, TOOL_GROUP }
 }

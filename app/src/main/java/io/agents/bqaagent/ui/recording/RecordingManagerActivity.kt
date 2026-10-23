@@ -22,6 +22,7 @@ import io.agents.bqaagent.recording.TaskRecordingStore
 import io.agents.bqaagent.ui.chat.ThemeManager
 import io.agents.bqaagent.utils.XLog
 import io.agents.bqaagent.widget.AlertDialog
+import io.agents.bqaagent.widget.CapacityWarningBanner
 import io.agents.bqaagent.widget.CommonToolbar
 import io.agents.bqaagent.widget.ConfirmDialog
 import io.agents.bqaagent.widget.LoadingDialog
@@ -123,14 +124,24 @@ class RecordingManagerActivity : BaseActivity() {
         if (::adapter.isInitialized) loadData()
     }
 
+    override fun onPause() {
+        super.onPause()
+        // Don't leave a countdown/animation running (and holding the view) while the screen is hidden.
+        if (::tvWarning.isInitialized) CapacityWarningBanner.cancel(tvWarning)
+    }
+
     private fun loadData() {
         lifecycleScope.launch {
             val snapshot = withContext(Dispatchers.IO) { buildSnapshot() }
             if (isFinishing || isDestroyed) return@launch
             adapter.submit(snapshot.rows)
             tvSummary.text = snapshot.summary
-            tvWarning.text = snapshot.warning.orEmpty()
-            tvWarning.visibility = if (snapshot.warning != null) View.VISIBLE else View.GONE
+            val warning = snapshot.warning
+            if (warning != null) {
+                CapacityWarningBanner.show(tvWarning, warning)
+            } else {
+                CapacityWarningBanner.hide(tvWarning)
+            }
             tvEmpty.visibility = if (snapshot.rows.isEmpty()) View.VISIBLE else View.GONE
         }
     }

@@ -6,7 +6,6 @@ package io.agents.bqaagent.ui.chat
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import io.agents.bqaagent.utils.SherpaOnnxHelper
 import android.text.format.DateUtils
 import android.widget.Toast
 import androidx.compose.animation.core.*
@@ -36,11 +35,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import io.agents.bqaagent.R
 import io.agents.bqaagent.TaskStatus
 import io.agents.bqaagent.agent.skill.Skill
 import io.agents.bqaagent.agent.skill.SkillCategory
 import io.agents.bqaagent.agent.skill.SkillRegistry
+import io.agents.bqaagent.ui.common.VoiceMicButton
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -55,13 +56,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import io.agents.bqaagent.BuildConfig
 import kotlinx.coroutines.launch
 import io.agents.bqaagent.agent.CloudProvider
 import io.agents.bqaagent.agent.llm.ModelConfigRepository
-import io.agents.bqaagent.utils.KVUtils
-import io.agents.bqaagent.utils.PermissionUtils
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -128,7 +128,7 @@ private fun Modifier.dismissKeyboardOnBackgroundTap(onDismissKeyboard: () -> Uni
 fun ChatScreen(
     messages: List<ChatMessage>,
     modelStatus: String,
-    needsPermission: Boolean,
+    permissionBannerText: String? = null,
     isAwaitingReply: Boolean,
     isTaskRunning: Boolean,
     isDownloading: Boolean = false,
@@ -145,6 +145,7 @@ fun ChatScreen(
     onNewChat: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenModels: () -> Unit,
+    onOpenBatch: () -> Unit = {},
     onFixPermissions: () -> Unit,
     onAttach: () -> Unit,
     conversations: List<ChatHistoryManager.ConversationSummary>,
@@ -162,6 +163,13 @@ fun ChatScreen(
     showUserImageUpload: Boolean = false,
     onUploadImage: () -> Unit = {},
     onSkipImageUpload: () -> Unit = {},
+    sensitiveConfirmPrompt: ChatSensitiveConfirmPrompt? = null,
+    onApproveSensitive: () -> Unit = {},
+    onDenySensitive: () -> Unit = {},
+    onOcrRequest: () -> Unit = {},
+    ocrLoading: Boolean = false,
+    ocrExtractedText: String? = null,
+    onOcrConsumed: () -> Unit = {},
     skillSaveState: SkillSaveOverlayState = SkillSaveOverlayState.Hidden,
     onOpenSkillSaveDetail: () -> Unit = {},
     onDismissSkillSave: () -> Unit = {},
@@ -245,6 +253,7 @@ fun ChatScreen(
                     ChatTopBar(
                         onMenuClick = { scope.launch { drawerState.open() } },
                         onSettings = onOpenSettings,
+                        onOpenBatch = onOpenBatch,
                         colors = colors,
                     )
                     if (activeTasks.isNotEmpty()) {
@@ -255,6 +264,12 @@ fun ChatScreen(
                             colors = colors,
                         )
                     }
+                    // Capability banner: non-blocking guidance (tap routes to Settings). The caller
+                    // passes null for READY and for the transient CONNECTING grace window, so the
+                    // bar never flashes on resume (same lesson as updateTaskRecordingLabel).
+                    permissionBannerText?.let {
+                        PermissionBanner(text = it, onClick = onFixPermissions, colors = colors)
+                    }
                 }
             },
             bottomBar = {
@@ -263,7 +278,7 @@ fun ChatScreen(
                         modifier = Modifier.imePadding()
                     ) {
                         val showQuickTaskTemplates = false
-                        // TODO 隐藏 Quick task templates
+                        // TODO Hide Quick task templates
                         if (showQuickTaskTemplates) {
                             QuickTasksPanel(
                                 isLocalModel = usesExplicitInputModes,
@@ -301,8 +316,11 @@ fun ChatScreen(
                             prefillIsTask = prefillIsTask,
                             onPrefillConsumed = { prefillText = "" },
                             voiceEnabled = voiceEnabled,
-                            // 新增权限回调
-                            onRequestRecordPermission = onRequestRecordPermission
+                            onRequestRecordPermission = onRequestRecordPermission,
+                            onOcrRequest = onOcrRequest,
+                            ocrLoading = ocrLoading,
+                            ocrExtractedText = ocrExtractedText,
+                            onOcrConsumed = onOcrConsumed,
                         )
                     }
                 }
@@ -356,7 +374,16 @@ fun ChatScreen(
                     )
                 }
 
-                // Download blocking overlay
+                sensitiveConfirmPrompt?.let { prompt ->
+                    SensitiveConfirmDialog(
+                        prompt = prompt,
+                        onApprove = onApproveSensitive,
+                        onDeny = onDenySensitive,
+                        colors = colors,
+                    )
+                }
+
+                // Download blocking overla
                 if (isDownloading) {
                     DownloadOverlay(progress = downloadProgress, colors = colors)
                 }
@@ -388,43 +415,146 @@ fun ChatScreen(
             colors = colors,
         )
     }
+}
 
-//    if (showAsrModelDialog) {
-//        AlertDialog(
-//            onDismissRequest = { },
-//            containerColor = colors.surface,
-//            title = {
-//                Text("初始化语音识别", color = colors.textPrimary)
-//            },
-//            text = {
-//                Column {
-//                    Text(
-//                        "正在下载离线语音模型（首次使用）...",
-//                        fontSize = 13.sp,
-//                        color = colors.textSecondary,
-//                    )
-//                    Spacer(Modifier.height(16.dp))
-//                    LinearProgressIndicator(
-//                        progress = { asrDownloadProgress / 100f },
-//                        modifier = Modifier
-//                            .fillMaxWidth()
-//                            .height(6.dp)
-//                            .clip(CompactSurfaceShape),
-//                        color = colors.accent,
-//                        trackColor = colors.inputBorder,
-//                    )
-//                    Spacer(Modifier.height(8.dp))
-//                    Text(
-//                        "$asrDownloadProgress%",
-//                        fontSize = 14.sp,
-//                        fontWeight = FontWeight.Bold,
-//                        color = colors.accent,
-//                    )
-//                }
-//            },
-//            confirmButton = {},
-//        )
-//    }
+// ======================== SENSITIVE CONFIRM DIALOG ========================
+
+@Composable
+private fun SensitiveConfirmDialog(
+    prompt: ChatSensitiveConfirmPrompt,
+    onApprove: () -> Unit,
+    onDeny: () -> Unit,
+    colors: PokeclawColors,
+) {
+    var remainingMs by remember(prompt) {
+        mutableStateOf((prompt.deadlineMs - System.currentTimeMillis()).coerceAtLeast(0L))
+    }
+    var expired by remember(prompt) { mutableStateOf(false) }
+
+    LaunchedEffect(prompt) {
+        while (!expired) {
+            val left = prompt.deadlineMs - System.currentTimeMillis()
+            if (left <= 0L) {
+                remainingMs = 0L
+                expired = true
+                onDeny()
+                break
+            }
+            remainingMs = left
+            kotlinx.coroutines.delay(200)
+        }
+    }
+
+    val totalSec = (remainingMs / 1000L).coerceAtLeast(0L)
+    val mmss = String.format(Locale.US, "%02d:%02d", totalSec / 60, totalSec % 60)
+    val riskLabel = when (prompt.riskType.lowercase()) {
+        "payment" -> stringResource(R.string.sensitive_confirm_risk_payment)
+        "password" -> stringResource(R.string.sensitive_confirm_risk_password)
+        else -> stringResource(R.string.sensitive_confirm_risk_other)
+    }
+
+    Dialog(
+        onDismissRequest = { /* modal: only explicit approve/deny/timeout resolves it */ },
+        properties = DialogProperties(
+            dismissOnClickOutside = false,
+            dismissOnBackPress = false
+        )
+    ) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = colors.surface,
+            shadowElevation = 8.dp,
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Lock,
+                    contentDescription = null,
+                    tint = colors.accent,
+                    modifier = Modifier.size(36.dp)
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = stringResource(R.string.sensitive_confirm_dialog_title),
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = colors.textPrimary,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(12.dp))
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = colors.background,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(
+                            text = stringResource(R.string.sensitive_confirm_dialog_action),
+                            fontSize = 12.sp,
+                            color = colors.textSecondary,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = prompt.actionSummary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = colors.textPrimary,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "${stringResource(R.string.sensitive_confirm_dialog_risk)}: $riskLabel",
+                            fontSize = 12.sp,
+                            color = colors.textSecondary,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = stringResource(R.string.sensitive_confirm_dialog_desc),
+                    fontSize = 13.sp,
+                    color = colors.textSecondary,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 18.sp,
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    text = stringResource(R.string.sensitive_confirm_dialog_countdown, mmss),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (totalSec <= 10L) Color(0xFFFF5252) else colors.accent,
+                )
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDeny,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.textSecondary),
+                    ) {
+                        Text(stringResource(R.string.sensitive_confirm_dialog_deny), fontSize = 14.sp)
+                    }
+                    Button(
+                        onClick = onApprove,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = colors.accent,
+                            contentColor = Color.White
+                        ),
+                    ) {
+                        Icon(Icons.Filled.Lock, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color.White)
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.sensitive_confirm_dialog_approve), fontSize = 14.sp, color = Color.White)
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ======================== TOP BAR ========================
@@ -434,6 +564,7 @@ fun ChatScreen(
 private fun ChatTopBar(
     onMenuClick: () -> Unit,
     onSettings: () -> Unit,
+    onOpenBatch: () -> Unit,
     colors: PokeclawColors,
 ) {
     Column {
@@ -453,12 +584,22 @@ private fun ChatTopBar(
             },
             navigationIcon = {
                 IconButton(onClick = onMenuClick) {
-                    Icon(Icons.Default.Menu, contentDescription = "Menu")
+                    Icon(Icons.Default.Menu, contentDescription = stringResource(R.string.chat_cd_menu))
                 }
             },
             actions = {
+                TextButton(onClick = onOpenBatch) {
+                    Icon(
+                        Icons.Default.PlaylistPlay,
+                        contentDescription = null,
+                        tint = colors.textSecondary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(stringResource(R.string.chat_tab_batch), fontSize = 13.sp, color = colors.textSecondary)
+                }
                 IconButton(onClick = onSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = "Settings")
+                    Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.cd_settings))
                 }
             },
             colors = TopAppBarDefaults.topAppBarColors(
@@ -488,9 +629,10 @@ private fun TextModelSwitcherRow(
         .coerceAtLeast(310)
         .coerceAtMost(420)
         .dp
+    val modelNoneLabel = stringResource(R.string.chat_model_none)
     val currentModelName = modelStatus
         .substringBefore(" · ")
-        .ifBlank { "No model selected" }
+        .ifBlank { modelNoneLabel }
 
     Box {
         Row(
@@ -512,7 +654,7 @@ private fun TextModelSwitcherRow(
             Spacer(Modifier.width(4.dp))
             Icon(
                 Icons.Default.KeyboardArrowDown,
-                contentDescription = "Switch model",
+                contentDescription = stringResource(R.string.chat_cd_switch_model),
                 tint = if (showModelMenu) colors.accent else colors.textSecondary,
                 modifier = Modifier.size(18.dp),
             )
@@ -555,21 +697,24 @@ private fun ModelSwitcherMenuContent(
     colors: PokeclawColors,
 ) {
     val resolvedConfig = ModelConfigRepository.snapshot()
+    val modelNoneLabel = stringResource(R.string.chat_model_none)
+    val activeLabel = stringResource(R.string.chat_model_active)
+    val openLabel = stringResource(R.string.chat_model_open)
     val currentModelName = modelStatus
         .substringBefore(" · ")
-        .ifBlank { "No model selected" }
+        .ifBlank { modelNoneLabel }
 
-    ModelMenuSectionLabel("Current model", colors)
+    ModelMenuSectionLabel(stringResource(R.string.chat_model_current), colors)
     ModelMenuInfoRow(
         title = currentModelName,
-        subtitle = if (isLocalModel) "Phone model" else "Online model",
+        subtitle = if (isLocalModel) stringResource(R.string.chat_model_phone) else stringResource(R.string.chat_model_online),
         colors = colors,
         selected = true,
     )
 
     if (sessionTokens > 0 && !isLocalModel) {
         ModelMenuInfoRow(
-            title = "Usage",
+            title = stringResource(R.string.chat_model_usage),
             subtitle = formatModelUsage(sessionTokens, sessionCost),
             colors = colors,
             selected = false,
@@ -577,7 +722,7 @@ private fun ModelSwitcherMenuContent(
     }
 
     HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-    ModelMenuSectionLabel("Phone models", colors)
+    ModelMenuSectionLabel(stringResource(R.string.chat_model_phone_group), colors)
     val localPath = resolvedConfig.local.modelPath
     if (localPath.isNotBlank() && File(localPath).exists()) {
         val localName = resolvedConfig.local.displayName.ifBlank {
@@ -585,25 +730,25 @@ private fun ModelSwitcherMenuContent(
         }
         ModelMenuRow(
             title = localName,
-            subtitle = "Gemma 4 on device",
+            subtitle = stringResource(R.string.chat_model_on_device),
             selected = isLocalModel,
-            trailing = if (isLocalModel) "Active" else null,
+            trailing = if (isLocalModel) activeLabel else null,
             colors = colors,
             onClick = { onModelSwitch("LOCAL", localName) },
         )
     } else {
         ModelMenuRow(
-            title = "No phone model",
-            subtitle = "Download Gemma 4 E2B or E4B",
+            title = stringResource(R.string.chat_model_no_phone),
+            subtitle = stringResource(R.string.chat_model_download_hint),
             selected = false,
-            trailing = "Open",
+            trailing = openLabel,
             colors = colors,
             onClick = onSettings,
         )
     }
 
     HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-    ModelMenuSectionLabel("Online models", colors)
+    ModelMenuSectionLabel(stringResource(R.string.chat_model_online_group), colors)
     val cloudConfig = if (resolvedConfig.isLocalActive()) {
         resolvedConfig.defaultCloud
     } else {
@@ -631,17 +776,17 @@ private fun ModelSwitcherMenuContent(
                 title = model.displayName,
                 subtitle = if (cloudProvider == CloudProvider.CUSTOM) cloudConfig.resolvedBaseUrl else model.id,
                 selected = selected,
-                trailing = if (selected) "Active" else null,
+                trailing = if (selected) activeLabel else null,
                 colors = colors,
                 onClick = { onModelSwitch(model.id, model.displayName) },
             )
         }
     } else {
         ModelMenuRow(
-            title = "Online setup required",
-            subtitle = "Configure API key and model",
+            title = stringResource(R.string.chat_model_online_setup),
+            subtitle = stringResource(R.string.chat_model_configure_hint),
             selected = false,
-            trailing = "Open",
+            trailing = openLabel,
             colors = colors,
             onClick = onSettings,
         )
@@ -649,7 +794,7 @@ private fun ModelSwitcherMenuContent(
 
     HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
     ModelMenuActionRow(
-        title = "Manage models",
+        title = stringResource(R.string.chat_model_manage),
         colors = colors,
         onClick = onSettings,
     )
@@ -820,7 +965,7 @@ private fun ModelMenuActionRow(
 // ======================== PERMISSION BANNER ========================
 
 @Composable
-private fun PermissionBanner(onClick: () -> Unit, colors: PokeclawColors) {
+private fun PermissionBanner(text: String, onClick: () -> Unit, colors: PokeclawColors) {
     Card(
         onClick = onClick,
         modifier = Modifier
@@ -838,7 +983,7 @@ private fun PermissionBanner(onClick: () -> Unit, colors: PokeclawColors) {
             Icon(Icons.Outlined.Shield, contentDescription = null, tint = colors.accent, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(8.dp))
             Text(
-                "Permissions needed. Tap to fix.",
+                text,
                 color = colors.accent,
                 fontSize = 13.sp,
                 modifier = Modifier.weight(1f),
@@ -967,7 +1112,7 @@ private fun CopyableMessageContainer(
             containerColor = colors.surface,
         ) {
             DropdownMenuItem(
-                text = { Text("Copy", color = colors.textPrimary) },
+                text = { Text(stringResource(R.string.chat_action_copy), color = colors.textPrimary) },
                 leadingIcon = {
                     Icon(Icons.Default.ContentCopy, contentDescription = null, tint = colors.textSecondary)
                 },
@@ -977,7 +1122,7 @@ private fun CopyableMessageContainer(
                 },
             )
             DropdownMenuItem(
-                text = { Text("Select text", color = colors.textPrimary) },
+                text = { Text(stringResource(R.string.chat_select_text), color = colors.textPrimary) },
                 leadingIcon = {
                     Icon(Icons.Default.Edit, contentDescription = null, tint = colors.textSecondary)
                 },
@@ -1010,7 +1155,7 @@ private fun SelectableMessageDialog(
         onDismissRequest = onDismiss,
         containerColor = colors.surface,
         title = {
-            Text("Select text", color = colors.textPrimary)
+            Text(stringResource(R.string.chat_select_text), color = colors.textPrimary)
         },
         text = {
             Box(
@@ -1038,12 +1183,12 @@ private fun SelectableMessageDialog(
                     onDismiss()
                 },
             ) {
-                Text("Copy all", color = colors.textSecondary)
+                Text(stringResource(R.string.chat_copy_all), color = colors.textSecondary)
             }
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("Done", color = colors.accent)
+                Text(stringResource(R.string.chat_done), color = colors.accent)
             }
         },
     )
@@ -1076,14 +1221,14 @@ private fun UserImageUploadCard(
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                text = "Screenshot Required",
+                text = stringResource(R.string.chat_screenshot_required),
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = colors.textPrimary,
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "The current screen is protected. Please take a screenshot and upload it to continue.",
+                text = stringResource(R.string.chat_screenshot_required_desc),
                 fontSize = 13.sp,
                 color = colors.textSecondary,
                 textAlign = TextAlign.Center,
@@ -1100,7 +1245,7 @@ private fun UserImageUploadCard(
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.textSecondary),
                 ) {
-                    Text("Skip", fontSize = 14.sp)
+                    Text(stringResource(R.string.chat_skip), fontSize = 14.sp)
                 }
                 Button(
                     onClick = onUpload,
@@ -1114,7 +1259,7 @@ private fun UserImageUploadCard(
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(Modifier.width(6.dp))
-                    Text("Upload", fontSize = 14.sp, color = Color.White)
+                    Text(stringResource(R.string.chat_upload), fontSize = 14.sp, color = Color.White)
                 }
             }
         }
@@ -1124,7 +1269,7 @@ private fun UserImageUploadCard(
 private fun copyTextToClipboard(context: Context, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("BQAAgent message", text))
-    Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+    Toast.makeText(context, context.getString(R.string.chat_copied), Toast.LENGTH_SHORT).show()
 }
 
 @Composable
@@ -1252,10 +1397,10 @@ private fun AssistantBubble(
 @Composable
 private fun TaskStatusHeader(status: TaskStatus, colors: PokeclawColors) {
     val (icon, tint, label) = when (status) {
-        TaskStatus.SUCCESS -> Triple(Icons.Filled.CheckCircle, Color(0xFF4ADE80), "Task succeeded")
-        TaskStatus.FAILED -> Triple(Icons.Filled.Cancel, Color(0xFFF87171), "Task failed")
-        TaskStatus.STOPPED -> Triple(Icons.Filled.StopCircle, Color(0xFFFBBF24), "Task stopped")
-        TaskStatus.CANCELLED -> Triple(Icons.Filled.DoNotDisturb, colors.textTertiary, "Task cancelled")
+        TaskStatus.SUCCESS -> Triple(Icons.Filled.CheckCircle, Color(0xFF4ADE80), stringResource(R.string.chat_task_succeeded))
+        TaskStatus.FAILED -> Triple(Icons.Filled.Cancel, Color(0xFFF87171), stringResource(R.string.chat_task_failed))
+        TaskStatus.STOPPED -> Triple(Icons.Filled.StopCircle, Color(0xFFFBBF24), stringResource(R.string.chat_task_stopped))
+        TaskStatus.CANCELLED -> Triple(Icons.Filled.DoNotDisturb, colors.textTertiary, stringResource(R.string.chat_task_cancelled))
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -1302,7 +1447,7 @@ private fun RecordingChip(
             )
             Spacer(Modifier.width(6.dp))
             Text(
-                text = "View recording",
+                text = stringResource(R.string.chat_view_recording),
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = colors.textSecondary,
@@ -1397,13 +1542,13 @@ private fun ToolGroup(message: ChatMessage, colors: PokeclawColors) {
             ) {
                 Icon(
                     if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowRight,
-                    contentDescription = if (expanded) "Collapse steps" else "Expand steps",
+                    contentDescription = if (expanded) stringResource(R.string.chat_collapse) else stringResource(R.string.chat_expand),
                     tint = colors.textSecondary,
                     modifier = Modifier.size(16.dp),
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    message.groupTitle ?: "Execution steps",
+                    message.groupTitle ?: stringResource(R.string.chat_execution_steps),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = colors.textSecondary,
@@ -1518,12 +1663,12 @@ private fun StepTimelineRow(step: ToolStep, isLast: Boolean, colors: PokeclawCol
     }
 }
 
-private fun formatStepTimestamp(timestamp: Long): String {
+internal fun formatStepTimestamp(timestamp: Long): String {
     val pattern = if (DateUtils.isToday(timestamp)) "h:mm:ss a" else "MMM d, h:mm:ss a"
     return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(timestamp))
 }
 
-private fun formatStepDuration(durationMs: Long): String {
+internal fun formatStepDuration(durationMs: Long): String {
     return when {
         durationMs < 1000 -> "${durationMs}ms"
         durationMs < 60_000 -> String.format(Locale.US, "%.1fs", durationMs / 1000.0)
@@ -1535,7 +1680,7 @@ private fun formatStepDuration(durationMs: Long): String {
     }
 }
 
-private fun formatStepTokens(tokens: Int): String {
+internal fun formatStepTokens(tokens: Int): String {
     return when {
         tokens < 1000 -> tokens.toString()
         tokens < 1_000_000 -> String.format(Locale.US, "%.1fK", tokens / 1000.0)
@@ -1650,37 +1795,17 @@ private fun ChatInputBar(
     prefillIsTask: Boolean = false,
     onPrefillConsumed: () -> Unit = {},
     voiceEnabled: Boolean = false,
-    // 新增权限申请回调
+    // Permission request callback
     onRequestRecordPermission: () -> Unit,
+    onOcrRequest: () -> Unit = {},
+    ocrLoading: Boolean = false,
+    ocrExtractedText: String? = null,
+    onOcrConsumed: () -> Unit = {},
 ) {
     var text by remember { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
-    val context = LocalContext.current
-    var asrHelper by remember { mutableStateOf<SherpaOnnxHelper?>(null) }
     var isVoiceRecording by remember { mutableStateOf(false) }
-    var isClickProcessing by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
-
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.3f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = EaseInOutSine),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulseScale"
-    )
-    val pulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 0.7f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = EaseInOutSine),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulseAlpha"
-    )
 
     LaunchedEffect(prefillText) {
         if (prefillText.isNotEmpty()) {
@@ -1690,22 +1815,13 @@ private fun ChatInputBar(
         }
     }
 
-    LaunchedEffect(voiceEnabled) {
-        if (voiceEnabled) {
-            if (asrHelper == null) {
-                asrHelper = SherpaOnnxHelper(context)
-            }
-            asrHelper?.let { helper ->
-                if (!helper.isModelReady) {
-                    helper.ensureModel()
-                }
-            }
-        } else {
-            asrHelper?.release()
-            asrHelper = null
+    LaunchedEffect(ocrExtractedText) {
+        val extracted = ocrExtractedText
+        if (!extracted.isNullOrEmpty()) {
+            text = extracted
+            onOcrConsumed()
         }
     }
-
 
     fun submitInput() {
         if (isTaskRunning) {
@@ -1724,13 +1840,6 @@ private fun ChatInputBar(
         text = ""
         focusManager.clearFocus()
         keyboardController?.hide()
-    }
-
-    // 页面销毁强制释放语音识别实例，避免引擎卡死
-    DisposableEffect(Unit) {
-        onDispose {
-            asrHelper?.release()
-        }
     }
 
     Column(
@@ -1771,7 +1880,7 @@ private fun ChatInputBar(
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(
-                        "Chat",
+                        stringResource(R.string.chat_mode_chat),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = if (!isTaskMode) colors.textPrimary else colors.textTertiary,
@@ -1787,7 +1896,7 @@ private fun ChatInputBar(
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(
-                        "Task",
+                        stringResource(R.string.chat_mode_task),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = if (isTaskMode) colors.textPrimary else colors.textTertiary,
@@ -1810,9 +1919,9 @@ private fun ChatInputBar(
                 placeholder = {
                     Text(
                         when {
-                            usesExplicitInputModes && isTaskMode -> "Describe a phone task..."
-                            !usesExplicitInputModes -> "Chat or give a task..."
-                            else -> "Chat with local AI..."
+                            usesExplicitInputModes && isTaskMode -> stringResource(R.string.chat_hint_task)
+                            !usesExplicitInputModes -> stringResource(R.string.chat_hint_unified)
+                            else -> stringResource(R.string.chat_hint_chat)
                         },
                         color = colors.textTertiary,
                         fontSize = 14.sp,
@@ -1837,6 +1946,27 @@ private fun ChatInputBar(
                 ),
                 textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp),
                 maxLines = 4,
+                leadingIcon = {
+                    if (ocrLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = colors.accent,
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        IconButton(
+                            onClick = onOcrRequest,
+                            modifier = Modifier.size(24.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CameraAlt,
+                                contentDescription = stringResource(R.string.ocr_cd_button),
+                                tint = colors.textTertiary,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+                },
                 trailingIcon = {
                     Surface(
                         onClick = { submitInput() },
@@ -1860,9 +1990,9 @@ private fun ChatInputBar(
                                     else -> Icons.Default.ArrowUpward
                                 },
                                 contentDescription = when {
-                                    isTaskRunning -> "Stop"
-                                    isAwaitingReply -> "Waiting for reply"
-                                    else -> "Send"
+                                    isTaskRunning -> stringResource(R.string.chat_stop)
+                                    isAwaitingReply -> stringResource(R.string.chat_cd_waiting)
+                                    else -> stringResource(R.string.chat_cd_send)
                                 },
                                 tint = Color.White,
                                 modifier = Modifier.size(14.dp),
@@ -1875,83 +2005,13 @@ private fun ChatInputBar(
             Spacer(Modifier.width(8.dp))
 
             if (voiceEnabled) {
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(40.dp)
-                        .then(
-                            if (isVoiceRecording) {
-                                Modifier
-                                    .clip(RoundedCornerShape(20.dp))
-                                    .background(colors.accent.copy(alpha = pulseAlpha))
-                                    .then(Modifier.graphicsLayer {
-                                        scaleX = pulseScale
-                                        scaleY = pulseScale
-                                    })
-                            } else Modifier
-                        )
-                        .pointerInput(Unit) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown()
-                                down.consume()
-
-                                if (isClickProcessing) {
-                                    waitForUpOrCancellation()
-                                    return@awaitEachGesture
-                                }
-                                isClickProcessing = true
-
-                                val ctx = context
-
-                                if (!PermissionUtils.hasRecordAudio(ctx)) {
-                                    onRequestRecordPermission()
-                                    isClickProcessing = false
-                                    waitForUpOrCancellation()
-                                    return@awaitEachGesture
-                                }
-
-                                val helper = asrHelper
-                                if (helper == null || !helper.isModelReady) {
-                                    Toast.makeText(ctx, "语音模型加载中...", Toast.LENGTH_SHORT).show()
-                                    isClickProcessing = false
-                                    waitForUpOrCancellation()
-                                    return@awaitEachGesture
-                                }
-
-                                isVoiceRecording = true
-                                @Suppress("MissingPermission")
-                                helper.startRecognition(object : SherpaOnnxHelper.AsrCallback {
-                                    override fun onPartialText(inputText: String) { text = inputText }
-                                    override fun onFinalText(inputText: String) {
-                                        text = inputText
-                                        isVoiceRecording = false
-                                        isClickProcessing = false
-                                    }
-                                    override fun onError(errorMsg: String) {
-                                        Toast.makeText(ctx, "识别失败：$errorMsg", Toast.LENGTH_SHORT).show()
-                                        isVoiceRecording = false
-                                        isClickProcessing = false
-                                    }
-                                })
-
-                                val up = waitForUpOrCancellation()
-                                up?.consume()
-
-                                if (helper.isRecording()) {
-                                    helper.stopRecognition()
-                                }
-                                isVoiceRecording = false
-                                isClickProcessing = false
-                            }
-                        },
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Mic,
-                        contentDescription = "长按说话",
-                        tint = if (isVoiceRecording) Color.White else colors.textSecondary,
-                        modifier = Modifier.size(22.dp),
-                    )
-                }
+                VoiceMicButton(
+                    voiceEnabled = true,
+                    colors = colors,
+                    onRequestRecordPermission = onRequestRecordPermission,
+                    onText = { text = it },
+                    onRecordingChange = { isVoiceRecording = it },
+                )
             }
         }
     }
@@ -2093,14 +2153,14 @@ private fun DownloadOverlay(progress: Int, colors: PokeclawColors) {
                 )
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    "Downloading your AI brain",
+                    stringResource(R.string.chat_downloading_title),
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
                     color = colors.textPrimary,
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "This only happens once",
+                    stringResource(R.string.chat_downloading_subtitle),
                     fontSize = 13.sp,
                     color = colors.textTertiary,
                 )
@@ -2174,7 +2234,7 @@ private fun EmptyStateWithPrompts(
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            "Chat or run tasks. Just type what you need.",
+            stringResource(R.string.chat_empty_subtitle),
             fontSize = 12.sp,
             lineHeight = 17.sp,
             color = colors.textSecondary,
@@ -2183,7 +2243,7 @@ private fun EmptyStateWithPrompts(
         )
 
         val showSuggestedPrompts = false
-        // TODO 隐藏首页建议提示词
+        // TODO Hide home suggested prompts
         if (showSuggestedPrompts) {
             Spacer(Modifier.height(12.dp))
             // Suggested prompt chips — same style as Quick Tasks items
@@ -2455,7 +2515,7 @@ private fun SidebarContent(
                         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Edit, contentDescription = null, tint = colors.textPrimary, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(12.dp))
-                            Text("Rename", color = colors.textPrimary)
+                            Text(stringResource(R.string.chat_action_rename), color = colors.textPrimary)
                         }
                     }
                     TextButton(
@@ -2469,7 +2529,7 @@ private fun SidebarContent(
                         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFF87171), modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(12.dp))
-                            Text("Delete", color = Color(0xFFF87171))
+                            Text(stringResource(R.string.chat_action_delete), color = Color(0xFFF87171))
                         }
                     }
                 }
@@ -2479,7 +2539,7 @@ private fun SidebarContent(
                 TextButton(
                     onClick = { actionTarget = null },
                     shape = StraightControlShape,
-                ) { Text("Cancel", color = colors.textSecondary) }
+                ) { Text(stringResource(R.string.common_cancel), color = colors.textSecondary) }
             },
             containerColor = colors.surface,
         )
@@ -2489,7 +2549,7 @@ private fun SidebarContent(
     if (deleteTarget != null) {
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
-            title = { Text("Delete conversation?", color = colors.textPrimary) },
+            title = { Text(stringResource(R.string.chat_delete_title), color = colors.textPrimary) },
             text = { Text(deleteTarget!!.title, color = colors.textSecondary, maxLines = 2, overflow = TextOverflow.Ellipsis) },
             confirmButton = {
                 TextButton(
@@ -2498,13 +2558,13 @@ private fun SidebarContent(
                         deleteTarget = null
                     },
                     shape = StraightControlShape,
-                ) { Text("Delete", color = Color(0xFFF87171)) }
+                ) { Text(stringResource(R.string.chat_action_delete), color = Color(0xFFF87171)) }
             },
             dismissButton = {
                 TextButton(
                     onClick = { deleteTarget = null },
                     shape = StraightControlShape,
-                ) { Text("Cancel", color = colors.textSecondary) }
+                ) { Text(stringResource(R.string.common_cancel), color = colors.textSecondary) }
             },
             containerColor = colors.surface,
         )
@@ -2514,7 +2574,7 @@ private fun SidebarContent(
     if (renameTarget != null) {
         AlertDialog(
             onDismissRequest = { renameTarget = null },
-            title = { Text("Rename conversation", color = colors.textPrimary) },
+            title = { Text(stringResource(R.string.chat_rename_title), color = colors.textPrimary) },
             text = {
                 androidx.compose.material3.OutlinedTextField(
                     value = renameText,
@@ -2540,13 +2600,13 @@ private fun SidebarContent(
                         renameTarget = null
                     },
                     shape = StraightControlShape,
-                ) { Text("Save", color = colors.accent) }
+                ) { Text(stringResource(R.string.common_save), color = colors.accent) }
             },
             dismissButton = {
                 TextButton(
                     onClick = { renameTarget = null },
                     shape = StraightControlShape,
-                ) { Text("Cancel", color = colors.textSecondary) }
+                ) { Text(stringResource(R.string.common_cancel), color = colors.textSecondary) }
             },
             containerColor = colors.surface,
         )
@@ -2588,7 +2648,7 @@ private fun SidebarContent(
         ) {
             Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
-            Text("New Chat")
+            Text(stringResource(R.string.chat_new))
         }
 
         Spacer(Modifier.height(12.dp))
@@ -2597,7 +2657,7 @@ private fun SidebarContent(
 
         // Recent label
         Text(
-            "Recent",
+            stringResource(R.string.chat_recent),
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             color = colors.textTertiary,
@@ -2606,7 +2666,7 @@ private fun SidebarContent(
 
         // Capacity + ordering + auto-cleanup hint (kept short on purpose).
         Text(
-            "${conversations.size}/${ChatHistoryManager.MAX_CONVERSATIONS} · oldest auto-removed when full",
+            stringResource(R.string.chat_recent_count, conversations.size, ChatHistoryManager.MAX_CONVERSATIONS),
             fontSize = 11.sp,
             color = colors.textTertiary,
             modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
@@ -2617,7 +2677,7 @@ private fun SidebarContent(
             if (conversations.isEmpty()) {
                 item {
                     Text(
-                        "No conversations yet",
+                        stringResource(R.string.chat_empty_list),
                         fontSize = 13.sp,
                         color = colors.textTertiary,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
@@ -2663,7 +2723,7 @@ private fun SidebarContent(
             ) {
                 Icon(Icons.Outlined.Settings, contentDescription = null, tint = colors.textSecondary, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(12.dp))
-                Text("Settings", color = colors.textSecondary)
+                Text(stringResource(R.string.settings_title), color = colors.textSecondary)
             }
         }
         TextButton(
@@ -2679,7 +2739,7 @@ private fun SidebarContent(
             ) {
                 Icon(Icons.Outlined.SmartToy, contentDescription = null, tint = colors.textSecondary, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(12.dp))
-                Text("Models", color = colors.textSecondary)
+                Text(stringResource(R.string.chat_models), color = colors.textSecondary)
             }
         }
 
@@ -2717,13 +2777,13 @@ private fun TaskSkillsPanel(
     ) {
         item {
             Text(
-                "Workflows",
+                stringResource(R.string.chat_workflows_title),
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = colors.textPrimary,
             )
             Text(
-                "Background tasks powered by AI — things a single prompt can't do.",
+                stringResource(R.string.chat_workflows_subtitle),
                 fontSize = 12.sp,
                 color = colors.textTertiary,
                 modifier = Modifier.padding(top = 4.dp, bottom = 2.dp),
@@ -2734,7 +2794,7 @@ private fun TaskSkillsPanel(
                 modifier = Modifier.padding(top = 4.dp, bottom = 4.dp),
             ) {
                 Text(
-                    "Experimental — more workflows coming soon",
+                    stringResource(R.string.chat_workflows_experimental),
                     fontSize = 11.sp,
                     color = colors.accent,
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -2746,8 +2806,8 @@ private fun TaskSkillsPanel(
         item {
             SkillCard(
                 icon = Icons.Outlined.Visibility,
-                title = "Monitor Messages",
-                description = "Auto-reply to someone's messages in background",
+                title = stringResource(R.string.chat_skill_monitor_title),
+                description = stringResource(R.string.chat_skill_monitor_desc),
                 onClick = onMonitorClick,
                 isActivating = activatingSkill == "monitor",
                 isActive = monitorActive,
@@ -2759,8 +2819,8 @@ private fun TaskSkillsPanel(
         item {
             SkillCard(
                 icon = Icons.Outlined.Send,
-                title = "Send Message",
-                description = "Send a message to someone via any messaging app",
+                title = stringResource(R.string.chat_skill_send_title),
+                description = stringResource(R.string.chat_skill_send_desc),
                 onClick = onSendClick,
                 colors = colors,
             )
@@ -2789,7 +2849,7 @@ private fun TaskSkillsPanel(
             item {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Recent",
+                    stringResource(R.string.chat_recent),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     color = colors.textTertiary,
@@ -2870,7 +2930,7 @@ private fun SkillCard(
                     Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = if (isActive) activeOrange else colors.textPrimary)
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        if (isActive) "Running in background" else description,
+                        if (isActive) stringResource(R.string.chat_running_in_background) else description,
                         fontSize = 12.sp,
                         color = if (isActive) activeOrange.copy(alpha = 0.7f) else colors.textTertiary,
                         lineHeight = 16.sp,
@@ -2947,7 +3007,7 @@ private fun MonitorDialog(
 
                 // Title
                 Text(
-                    "Monitor & Auto-Reply",
+                    stringResource(R.string.chat_monitor_dialog_title),
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = colors.textPrimary,
@@ -2960,7 +3020,7 @@ private fun MonitorDialog(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        "Target",
+                        stringResource(R.string.chat_monitor_target),
                         fontSize = 11.sp,
                         color = colors.textSecondary,
                         modifier = Modifier.width(50.dp),
@@ -2985,7 +3045,7 @@ private fun MonitorDialog(
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
                             ) {
                                 if (contact.isEmpty()) {
-                                    Text("e.g. Mom, +1 555 123 4567", fontSize = 12.sp, color = colors.textTertiary)
+                                    Text(stringResource(R.string.chat_monitor_target_hint), fontSize = 12.sp, color = colors.textTertiary)
                                 }
                                 innerTextField()
                             }
@@ -3000,7 +3060,7 @@ private fun MonitorDialog(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        "App",
+                        stringResource(R.string.chat_monitor_app),
                         fontSize = 11.sp,
                         color = colors.textSecondary,
                         modifier = Modifier.width(50.dp),
@@ -3044,7 +3104,7 @@ private fun MonitorDialog(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        "Tone",
+                        stringResource(R.string.chat_monitor_tone),
                         fontSize = 11.sp,
                         color = colors.textSecondary,
                         modifier = Modifier.width(50.dp),
@@ -3094,7 +3154,7 @@ private fun MonitorDialog(
                     color = colors.userBubble,
                 ) {
                     Text(
-                        "Start Monitoring",
+                        stringResource(R.string.chat_monitor_start),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White,
@@ -3123,13 +3183,13 @@ private fun SendMessageDialog(
         onDismissRequest = onDismiss,
         containerColor = colors.surface,
         title = {
-            Text("Send Message", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = colors.textPrimary)
+            Text(stringResource(R.string.chat_skill_send_title), fontSize = 18.sp, fontWeight = FontWeight.Bold, color = colors.textPrimary)
         },
         text = {
             Column {
-                Text("With a smarter LLM, you can just type:", fontSize = 11.sp, color = colors.textTertiary)
+                Text(stringResource(R.string.chat_send_hint_prefix), fontSize = 11.sp, color = colors.textTertiary)
                 Spacer(Modifier.height(2.dp))
-                Text("\"send hi to Mom on WhatsApp\"", fontSize = 11.sp, color = colors.accent.copy(alpha = 0.7f))
+                Text(stringResource(R.string.chat_send_hint_example), fontSize = 11.sp, color = colors.accent.copy(alpha = 0.7f))
                 Spacer(Modifier.height(16.dp))
 
                 // Fill-in-the-blank: "Send [___] to [___] on [WhatsApp ▾]"
@@ -3137,12 +3197,12 @@ private fun SendMessageDialog(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Send ", fontSize = 15.sp, color = colors.textPrimary)
+                    Text(stringResource(R.string.chat_send_word_send), fontSize = 15.sp, color = colors.textPrimary)
                     Text("\"", fontSize = 15.sp, color = colors.textTertiary)
                     OutlinedTextField(
                         value = message,
                         onValueChange = { message = it },
-                        placeholder = { Text("message", color = colors.textTertiary, fontSize = 14.sp) },
+                        placeholder = { Text(stringResource(R.string.chat_send_ph_message), color = colors.textTertiary, fontSize = 14.sp) },
                         modifier = Modifier.weight(1f).heightIn(min = 40.dp),
                         shape = StraightControlShape,
                         singleLine = true,
@@ -3162,11 +3222,11 @@ private fun SendMessageDialog(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("to ", fontSize = 15.sp, color = colors.textPrimary)
+                    Text(stringResource(R.string.chat_send_word_to), fontSize = 15.sp, color = colors.textPrimary)
                     OutlinedTextField(
                         value = contact,
                         onValueChange = { contact = it },
-                        placeholder = { Text("name", color = colors.textTertiary, fontSize = 14.sp) },
+                        placeholder = { Text(stringResource(R.string.chat_send_ph_name), color = colors.textTertiary, fontSize = 14.sp) },
                         modifier = Modifier.weight(1f).heightIn(min = 40.dp),
                         shape = StraightControlShape,
                         singleLine = true,
@@ -3179,7 +3239,7 @@ private fun SendMessageDialog(
                             unfocusedTextColor = colors.textPrimary,
                         ),
                     )
-                    Text(" on ", fontSize = 15.sp, color = colors.textPrimary)
+                    Text(stringResource(R.string.chat_send_word_on), fontSize = 15.sp, color = colors.textPrimary)
                     Box {
                         Surface(
                             onClick = { appMenuExpanded = true },
@@ -3217,7 +3277,7 @@ private fun SendMessageDialog(
                 colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
                 shape = StraightControlShape,
             ) {
-                Text("Send")
+                Text(stringResource(R.string.chat_action_send))
             }
         },
         dismissButton = {
@@ -3225,7 +3285,7 @@ private fun SendMessageDialog(
                 onClick = onDismiss,
                 shape = StraightControlShape,
             ) {
-                Text("Cancel", color = colors.textSecondary)
+                Text(stringResource(R.string.common_cancel), color = colors.textSecondary)
             }
         },
     )
@@ -3266,7 +3326,7 @@ private fun ActiveTaskBar(
                 )
                 Spacer(Modifier.width(10.dp))
                 Text(
-                    text = if (tasks.size == 1) "Monitoring: ${tasks[0]}" else "${tasks.size} monitoring",
+                    text = if (tasks.size == 1) stringResource(R.string.chat_monitoring_one, tasks[0]) else stringResource(R.string.chat_monitoring_many, tasks.size),
                     color = colors.textPrimary,
                     fontSize = 13.sp,
                     maxLines = 1,
@@ -3274,7 +3334,7 @@ private fun ActiveTaskBar(
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    text = if (expanded) "Collapse" else "Expand",
+                    text = if (expanded) stringResource(R.string.chat_collapse) else stringResource(R.string.chat_expand),
                     color = colors.textSecondary,
                     fontSize = 12.sp,
                 )
@@ -3307,7 +3367,7 @@ private fun ActiveTaskBar(
                         modifier = Modifier.weight(1f),
                     )
                     Text(
-                        text = "Stop",
+                        text = stringResource(R.string.chat_stop),
                         color = androidx.compose.ui.graphics.Color(0xFFF44336),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,
@@ -3325,7 +3385,7 @@ private fun ActiveTaskBar(
                     horizontalArrangement = Arrangement.End,
                 ) {
                     Text(
-                        text = "Stop All",
+                        text = stringResource(R.string.chat_stop_all),
                         color = androidx.compose.ui.graphics.Color(0xFFF44336),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,

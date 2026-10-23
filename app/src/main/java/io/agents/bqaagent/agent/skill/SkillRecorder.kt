@@ -11,7 +11,7 @@ import io.agents.bqaagent.utils.XLog
 object SkillRecorder {
 
     private const val TAG = "SkillRecorder"
-    private const val MIN_STEPS_TO_RECORD = 3
+    private const val MIN_STEPS_TO_RECORD = 2
 
     private val NODE_ID_PATTERN = Regex("^n\\d+$")
 
@@ -30,7 +30,6 @@ object SkillRecorder {
         "find_and_tap", "scroll_to_find",
         "input_text", "input_amount",
         "secure_keypad_input",
-        "bank_own_account_transfer",
         "system_key",
         "swipe",
         "wait",
@@ -96,7 +95,9 @@ object SkillRecorder {
         anchorTexts: List<String> = emptyList(),
         nodeLocator: NodeLocator? = null,
         intent: String = "",
-        precomputedTargetText: String? = null
+        precomputedTargetText: String? = null,
+        sensitive: Boolean = false,
+        confirmSummary: String = ""
     ) {
         if (!isRecording) return
         if (toolName !in RECORDABLE_TOOLS) return
@@ -117,11 +118,15 @@ object SkillRecorder {
             anchorTexts = anchorTexts,
             nodeLocator = nodeLocator,
             targetText = precomputedTargetText.orEmpty(),
-            intent = normalizeStepIntent(intent).takeIf { it.isNotBlank() }
+            intent = normalizeStepIntent(intent).takeIf { it.isNotBlank() },
+            sensitive = sensitive,
+            confirmSummary = confirmSummary
         )
         recordedSteps.add(step)
         XLog.d(TAG, "Recorded step ${step.stepIndex}: $toolName")
     }
+
+    fun isRecordableTool(toolName: String): Boolean = toolName in RECORDABLE_TOOLS
 
     /**
      * Normalize the LLM-provided step intent into a concise, formal narration:
@@ -298,6 +303,7 @@ object SkillRecorder {
      * Stop recording and hand over the raw session data without persisting.
      * Ownership of the data moves to the caller (in-memory only, per design
      * nothing is staged on disk). Returns null when the session has fewer
+     * than MIN_STEPS_TO_RECORD successfully recorded steps.
      */
     @Synchronized
     fun stopWithoutSave(): RecordingSession? {

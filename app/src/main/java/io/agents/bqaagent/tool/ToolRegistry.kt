@@ -76,7 +76,6 @@ object ToolRegistry {
         register(FindAndTapTool())
         register(SecureKeypadInputTool())
         register(InputAmountTool())
-        register(BankOwnAccountTransferTool())
         register(SendMessageTool())
         register(AutoReplyTool())
         register(AnalyzeScreenVisualTool())

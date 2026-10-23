@@ -46,6 +46,7 @@ Style requirements — this sentence is a neutral, formal narration, like a syst
 - Do NOT use first or second person ("I", "me", "my", "we", "let's", "you").
 - Do NOT use conversational fillers or emotional wording ("Okay", "Alright", "Now", "Great", "unfortunately").
 - Do NOT describe the whole screen, do NOT explain reasoning, and do NOT repeat previous steps.
+- Language: ALWAYS write the narration sentence in the SAME language as the user's input. If the user writes in Chinese, write in Chinese; if in English, write in English. Never mix languages.
 This sentence is separate from tool parameters and never replaces any tool argument. When you answer the user with text only (no tool call), this rule does not apply.
 
 Note: The get_screen_info in step 1 also serves as verification of the previous round's action — no need to call it again separately to verify.

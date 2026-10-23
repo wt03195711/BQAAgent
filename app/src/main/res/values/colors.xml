@@ -88,4 +88,13 @@
     <color name="colorInfoOnPrimary">#FFFFFFFF</color>
     <color name="colorInfoContainer">#FFEEF9FF</color>
     <color name="colorInfoOnContainer">#FF007BBE</color>
+
+    <!-- Floating window (theme-independent: near-white translucent fill + brand-red outline) -->
+    <color name="float_bg">#FFFFFFFF</color>             <!-- solid white, matches the logo's opaque white tile (no two-tone) -->
+    <color name="float_text">#FF1D1D1B</color>           <!-- dark label / status text on the light pill -->
+    <color name="float_border">#E6DB0011</color>         <!-- guaranteed brand outline (90%) -->
+    <color name="float_border_warning">#E6E37318</color> <!-- token pressure: outline only -->
+    <color name="float_border_error">#E6F6685D</color>   <!-- token critical: outline only -->
+    <color name="float_stop_bg">#FFDB0011</color>        <!-- brand-red circular stop chip -->
+    <color name="float_stop_text">#FFFFFFFF</color>     <!-- (kept) white on the chip -->
 </resources>

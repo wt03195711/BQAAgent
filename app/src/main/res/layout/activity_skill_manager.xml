@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/colorBgPrimary"
@@ -9,6 +10,36 @@
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="44dp" />
+
+    <TextView
+        android:id="@+id/tvSummary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:lineSpacingExtra="3dp"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="10dp"
+        android:textColor="@color/colorTextTertiary"
+        android:textSize="12dp"
+        tools:text="12 of 50 Skills saved\nWhen the limit is reached, new tasks can no longer be saved as Skills." />
+
+    <TextView
+        android:id="@+id/tvWarning"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/colorWarningContainer"
+        android:lineSpacingExtra="3dp"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="10dp"
+        android:textColor="@color/colorWarningOnContainer"
+        android:textSize="12dp"
+        android:visibility="gone"
+        tools:text="Skill library almost full — 46 of 50 used."
+        tools:visibility="visible" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/colorBorderBase" />
 
     <FrameLayout
         android:layout_width="match_parent"

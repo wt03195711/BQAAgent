@@ -20,6 +20,7 @@ import io.agents.bqaagent.agent.skill.SkillMatcher
 import io.agents.bqaagent.agent.skill.SkillStore
 import io.agents.bqaagent.base.BaseActivity
 import io.agents.bqaagent.ui.chat.ThemeManager
+import io.agents.bqaagent.widget.CapacityWarningBanner
 import io.agents.bqaagent.widget.CommonToolbar
 import io.agents.bqaagent.widget.ConfirmDialog
 import io.agents.bqaagent.widget.InputDialog
@@ -31,6 +32,8 @@ import kotlinx.coroutines.withContext
 class SkillManagerActivity : BaseActivity() {
 
     private lateinit var adapter: SkillManagerAdapter
+    private lateinit var tvSummary: TextView
+    private lateinit var tvWarning: TextView
     private val expandedSkillIds = mutableSetOf<String>()
 
     private val detailGson by lazy {
@@ -55,6 +58,10 @@ class SkillManagerActivity : BaseActivity() {
             showBackButton(true) { finish() }
             findViewById<ImageView>(R.id.ivBack)?.setColorFilter(tc.aiText)
         }
+
+        tvSummary = findViewById(R.id.tvSummary)
+        tvWarning = findViewById(R.id.tvWarning)
+        tvSummary.setTextColor(tc.toolDefault)
 
         adapter = SkillManagerAdapter(
             onToggleSkill = { skillId -> toggleSkill(skillId) },
@@ -81,16 +88,30 @@ class SkillManagerActivity : BaseActivity() {
 
     private fun loadData() {
         lifecycleScope.launch {
-            val rows = withContext(Dispatchers.IO) { buildRows() }
-            adapter.submit(rows)
+            val snapshot = withContext(Dispatchers.IO) { buildSnapshot() }
+            if (isFinishing || isDestroyed) return@launch
+            adapter.submit(snapshot.rows)
+            tvSummary.text = getString(R.string.skill_manager_summary, snapshot.skillCount, SkillStore.MAX_SKILLS)
+            val nearCap = snapshot.skillCount >= SkillStore.SKILL_LIMIT_WARN_THRESHOLD
+            if (nearCap) {
+                CapacityWarningBanner.show(
+                    tvWarning,
+                    getString(R.string.skill_manager_warning, snapshot.skillCount, SkillStore.MAX_SKILLS)
+                )
+            } else {
+                CapacityWarningBanner.hide(tvWarning)
+            }
             findViewById<TextView>(R.id.tvEmpty).visibility =
-                if (rows.isEmpty()) View.VISIBLE else View.GONE
+                if (snapshot.rows.isEmpty()) View.VISIBLE else View.GONE
         }
     }
 
-    private fun buildRows(): List<SkillManagerRow> {
+    private data class Snapshot(val rows: List<SkillManagerRow>, val skillCount: Int)
+
+    private fun buildSnapshot(): Snapshot {
+        val skills = SkillStore.getAllSkills().sortedByDescending { it.updatedAtMs }
         val rows = mutableListOf<SkillManagerRow>()
-        for (skill in SkillStore.getAllSkills().sortedByDescending { it.updatedAtMs }) {
+        for (skill in skills) {
             val templates = SkillStore.getTemplates(skill.skillId)
             val expanded = skill.skillId in expandedSkillIds
             rows.add(SkillManagerRow.SkillHeader(skill, templates.size, expanded))
@@ -100,7 +121,7 @@ class SkillManagerActivity : BaseActivity() {
                 rows.add(SkillManagerRow.TemplateItem(skill, template, envMatches(template)))
             }
         }
-        return rows
+        return Snapshot(rows, skills.size)
     }
 
     private fun envMatches(template: ExecutionTemplate): Boolean {

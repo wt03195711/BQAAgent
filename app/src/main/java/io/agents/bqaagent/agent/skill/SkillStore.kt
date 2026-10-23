@@ -12,6 +12,16 @@ import java.io.File
 object SkillStore {
 
     private const val TAG = "SkillStore"
+
+    /**
+     * Hard cap on the number of saved skills. Single source of truth for BOTH the chat save overlay
+     * (TaskFlowController) and batch auto-save (SkillAutoSaver / BatchTaskDriver). A NEW-skill save is
+     * abandoned once the library already holds this many; updating an existing skill's template is never
+     * capped. [SKILL_LIMIT_WARN_THRESHOLD] is the batch pre-check "approaching cap" line (cap minus slack).
+     */
+    const val MAX_SKILLS = 100
+    const val SKILL_LIMIT_WARN_THRESHOLD = MAX_SKILLS - 10
+
     private val gson: Gson = GsonBuilder().setPrettyPrinting().create()
 
     private var skillsRootDir: File? = null

@@ -9,9 +9,10 @@ package io.agents.bqaagent
  * The judgement authority is encoded in the value itself:
  * - [SUCCESS] / [FAILED] are decided by the LLM through finish(status=...). SUCCESS is additionally
  *   subject to a lightweight system evidence check: a success claim with zero successful device
- *   actions on a non-chat task is downgraded to FAILED / UNVERIFIED.
+ *   actions on a non-chat task is downgraded to FAILED / UNVERIFIED. FAILED additionally covers
+ *   system-decided sensitive-confirmation rejection/timeout (reason code SENSITIVE_CONFIRM).
  * - [STOPPED] is decided by system code: token/iteration limits, stuck detector, system dialog,
- *   unusable screen, sensitive policy, image-analysis termination.
+ *   unusable screen, image-analysis termination.
  * - [CANCELLED] is decided by the user.
  */
 enum class TaskStatus {
@@ -41,6 +42,7 @@ object TaskReasonCode {
     const val DESCRIPTION_MISMATCH = "DESCRIPTION_MISMATCH"
     const val UNVERIFIED = "UNVERIFIED"
     const val EMPTY_RESPONSE = "EMPTY_RESPONSE"
+    const val SENSITIVE_CONFIRM = "SENSITIVE_CONFIRM"
     const val OTHER = "OTHER"
 
     // --- STOPPED (system-decided) ---
@@ -49,7 +51,6 @@ object TaskReasonCode {
     const val STUCK = "STUCK"
     const val SYSTEM_DIALOG = "SYSTEM_DIALOG"
     const val UNUSABLE_SCREEN = "UNUSABLE_SCREEN"
-    const val SENSITIVE_POLICY = "SENSITIVE_POLICY"
     const val IMAGE_ANALYSIS = "IMAGE_ANALYSIS"
     const val LLM_ERROR = "LLM_ERROR"
 

@@ -7,9 +7,9 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 
 object PermissionUtils {
-    // 此处保留你原有全部方法...
+    // All original helper methods are retained below.
 
-    /** 检查麦克风录音权限 */
+    /** Check the microphone recording permission. */
     fun hasRecordAudio(context: Context): Boolean {
         return ContextCompat.checkSelfPermission(
             context,
@@ -17,7 +17,7 @@ object PermissionUtils {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
-    /** 申请录音权限 */
+    /** Request the recording permission. */
     fun requestRecordAudio(activity: androidx.appcompat.app.AppCompatActivity, requestCode: Int = 1002) {
         ActivityCompat.requestPermissions(
             activity,

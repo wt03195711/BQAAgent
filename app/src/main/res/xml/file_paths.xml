@@ -2,5 +2,6 @@
 <paths>
     <external-files-path name="downloads" path="Download" />
     <external-files-path name="recordings" path="recordings" />
+    <external-files-path name="ocr_uploads" path="ocr_uploads" />
     <cache-path name="cache" path="." />
 </paths>

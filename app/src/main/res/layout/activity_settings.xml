@@ -35,21 +35,15 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content" />
 
+            <!-- 通用设置分组 -->
+            <io.agents.bqaagent.widget.MenuGroup
+                android:id="@+id/generalGroup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+
             <!-- Appearance -->
             <io.agents.bqaagent.widget.MenuGroup
                 android:id="@+id/appearanceGroup"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content" />
-
-            <!-- Skill Management -->
-            <io.agents.bqaagent.widget.MenuGroup
-                android:id="@+id/skillManagerGroup"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content" />
-
-            <!-- Task Recording -->
-            <io.agents.bqaagent.widget.MenuGroup
-                android:id="@+id/recordingGroup"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content" />
 

@@ -3,11 +3,10 @@
 
 package io.agents.bqaagent.recording
 
-import android.content.Context
-import android.os.PowerManager
 import io.agents.bqaagent.ClawApplication
 import io.agents.bqaagent.adb.LocalAdbAutomation
 import io.agents.bqaagent.utils.KVUtils
+import io.agents.bqaagent.utils.ScreenKeepAliveManager
 import io.agents.bqaagent.utils.XLog
 import java.io.File
 import java.util.concurrent.Executors
@@ -32,8 +31,6 @@ object TaskRecordingCoordinator {
     private const val DEVICE_ACTIVE_COOLDOWN_MS = 2_500L
     private const val TAIL_FRAME_MS = 800L
     private const val CHAT_RESUME_WAIT_MS = 3_000L
-    private const val WAKE_LOCK_TIMEOUT_MS = 5 * 60 * 1000L
-    private const val WAKE_LOCK_RENEW_MS = 4 * 60 * 1000L
     private const val MAX_SEGMENTS = 400
     /** Liveness costs a shell round trip; poll it 10x less often than the tick. */
     private const val LIVENESS_POLL_MS = 10_000L
@@ -58,8 +55,6 @@ object TaskRecordingCoordinator {
     @Volatile private var armedChannel = ""
     @Volatile private var chatResumed = false
     @Volatile private var unsafeUntil = 0L
-    @Volatile private var lastWakeLockTouch = 0L
-
     @Volatile private var recordingDir: File? = null
     @Volatile private var manifest: TaskRecordingManifest? = null
     @Volatile private var support: AdbScreenRecorder.Support? = null
@@ -69,11 +64,16 @@ object TaskRecordingCoordinator {
     @Volatile private var activeSegmentIndex = -1
     @Volatile private var tickFuture: ScheduledFuture<*>? = null
     @Volatile private var stopRequested = false
-    @Volatile private var lastLivenessAt = 0L
-    @Volatile private var lastAlive = true
-    /** Consecutive liveness misses where the lookup actually ran. A failed lookup does not count. */
-    @Volatile private var livenessMissCount = 0
-    @Volatile private var firstLivenessMissAt = 0L
+    private var lastLivenessAt = 0L
+    private var lastAlive = true
+    private var livenessMissCount = 0
+    private var firstLivenessMissAt = 0L
+    /**
+     * True between a successful [ScreenKeepAliveManager.acquire] in [doStart] and the
+     * matching release in [reset]. Guards against abort() paths that fire before acquire()
+     * (which would decrement another holder's refCount, e.g. BatchTaskDriver's outer hold).
+     */
+    private var keepAliveHeld = false
     @Volatile var lastAbortReason: String? = null
         private set
 
@@ -94,7 +94,13 @@ object TaskRecordingCoordinator {
      */
     @Volatile private var taskRecordingId: String? = null
 
-    private var wakeLock: PowerManager.WakeLock? = null
+    /**
+     * Recording ids (== dir names) that retention must never prune while a batch is live. Empty for
+     * normal chat usage, so single-task behaviour is unchanged. The batch driver sets it before the
+     * first task and clears it when the batch settles; each finished task's id is added via
+     * [addToRetentionProtection] so its own save-time retention pass cannot delete it.
+     */
+    @Volatile private var retentionProtectIds: Set<String> = emptySet()
 
     // ==================== Public API (all non-blocking) ====================
 
@@ -183,6 +189,18 @@ object TaskRecordingCoordinator {
 
     /** Id of the recording for the current/just-finished task, or null when it was not recorded. */
     fun currentTaskRecordingId(): String? = taskRecordingId
+
+    /** Batch driver: replace the whole protection set (typically at batch start). */
+    fun setRetentionProtection(ids: Set<String>) { retentionProtectIds = ids.toSet() }
+
+    /** Batch driver: shield one more recording (typically the id just produced by a task). */
+    fun addToRetentionProtection(id: String?) {
+        if (id.isNullOrBlank()) return
+        retentionProtectIds = retentionProtectIds + id
+    }
+
+    /** Batch driver: drop all protection (batch settled) so normal size-based retention resumes. */
+    fun clearRetentionProtection() { retentionProtectIds = emptySet() }
 
     fun onChatPaused() { chatResumed = false }
 
@@ -431,7 +449,8 @@ object TaskRecordingCoordinator {
         manifest = newManifest
         taskRecordingId = newManifest.recordingId
         lastAbortReason = null
-        acquireWakeLock()
+        ScreenKeepAliveManager.acquire(ClawApplication.instance)
+        keepAliveHeld = true
 
         val started = launchSegment(dir, 0, "task-start", newManifest)
         if (!started) {
@@ -517,8 +536,6 @@ object TaskRecordingCoordinator {
         if (phase != RecordingPhase.RECORDING) return
         val m = manifest ?: return
         val dir = recordingDir ?: return
-
-        renewWakeLockIfNeeded()
 
         val totalMs = System.currentTimeMillis() - m.startedAt
         val maxTotalMs = KVUtils.getTaskRecordingMaxTotalMinutes().let {
@@ -692,8 +709,7 @@ object TaskRecordingCoordinator {
         }
 
         TaskRecordingStore.writeManifest(dir, m)
-        TaskRecordingStore.enforceRetention()
-        releaseWakeLock()
+        TaskRecordingStore.enforceRetention(retentionProtectIds)
 
         XLog.i(TAG, "Recording saved id=${m.recordingId} outcome=${m.outcome} " +
                 "segments=${m.segmentCount} duration=${TaskRecordingStore.formatDuration(m.totalDurationMs)} " +
@@ -735,50 +751,17 @@ object TaskRecordingCoordinator {
         lastAlive = true
         livenessMissCount = 0
         firstLivenessMissAt = 0L
-        releaseWakeLock()
-    }
-
-    // ==================== Wake lock ====================
-
-    /**
-     * AppViewModel's automation wake lock times out after 10 minutes and is never renewed
-     * (AppViewModel L116/L123), which would black out both the automation and the recording on
-     * long tasks. This lock is held only while recording is active, uses exactly the same flags as
-     * the existing one, and is additive — nothing changes while the recording switch is off.
-     */
-    private fun acquireWakeLock() {
-        try {
-            if (wakeLock?.isHeld == true) {
-                lastWakeLockTouch = System.currentTimeMillis()
-                return
-            }
-            val pm = ClawApplication.instance.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
-            wakeLock = pm.newWakeLock(
-                PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "BQAAgent::TaskRecordingWakeLock"
-            ).apply { acquire(WAKE_LOCK_TIMEOUT_MS) }
-            lastWakeLockTouch = System.currentTimeMillis()
-            XLog.i(TAG, "Recording wake lock acquired")
-        } catch (e: Throwable) {
-            XLog.w(TAG, "Failed to acquire recording wake lock: ${e.message}")
+        // Only release if this coordinator actually holds the keep-alive. Guards
+        // against abort() paths that fire before doStart() ever called acquire(),
+        // which would otherwise decrement another holder's refCount (e.g. the
+        // BatchTaskDriver's outer hold) and prematurely restore screen_off_timeout.
+        if (keepAliveHeld) {
+            ScreenKeepAliveManager.release()
+            keepAliveHeld = false
         }
     }
 
-    private fun renewWakeLockIfNeeded() {
-        if (System.currentTimeMillis() - lastWakeLockTouch < WAKE_LOCK_RENEW_MS) return
-        acquireWakeLock()
-    }
-
-    private fun releaseWakeLock() {
-        try {
-            wakeLock?.let { if (it.isHeld) it.release() }
-        } catch (e: Throwable) {
-            XLog.w(TAG, "Failed to release recording wake lock: ${e.message}")
-        }
-        wakeLock = null
-    }
-
-    // ==================== Crash recovery ====================
+    // ==================== Crash recovery ===================
 
     /** Finalises recordings left behind by a killed process, then applies retention. */
     private fun reconcile() {

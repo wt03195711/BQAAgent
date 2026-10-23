@@ -6,9 +6,7 @@
     <string name="common_cancel">取消</string>
     <string name="common_close">关闭</string>
     <string name="common_save">保存</string>
-    <string name="common_agree">同意</string>
     <string name="common_unconfigured">未配置</string>
-    <string name="common_load_failed">加载失败: %s</string>
 
     <string name="app_slogan">一款能做事的AI Agents</string>
 
@@ -21,36 +19,41 @@
     <string name="guide_desc_local_adb">通过 Android 无线调试让 BQAAgent 直接使用 ADB 自动化能力。\n\n打开无线调试，点“使用配对码配对设备”，然后只输入配对码。</string>
     <string name="guide_title_notification">任务通知</string>
     <string name="guide_desc_notification">只在任务执行或监控开启时显示进度通知。\n\n在首页点击对应卡片即可开启。Android 13 及以上会先请求通知权限。</string>
-    <string name="guide_title_overlay">悬浮窗</string>
-    <string name="guide_desc_overlay">显示 AI 执行状态的浮动面板。\n\n1. 前往系统设置 → 应用 → BQAAgent\n2. 找到「显示在其他应用上方」\n3. 开启开关</string>
-    <string name="guide_title_battery">电池白名单</string>
-    <string name="guide_desc_battery">防止系统在后台关闭应用。\n\n在首页点击对应卡片，然后在系统弹窗中确认「允许」。(部分品牌手机需要修改为"无限制")</string>
-    <string name="guide_title_storage">文件访问</string>
-    <string name="guide_desc_storage">允许 AI 读写设备上的文件。\n\nAndroid 11 及以上：前往设置开启「所有文件访问」\nAndroid 10 及以下：在弹窗中授予权限</string>
 
     <!-- 首页 -->
-    <string name="home_need_notification_permission">需要通知权限才能显示常驻通知</string>
     <string name="home_enable_local_adb">打开无线调试，然后输入配对码</string>
-    <string name="home_local_adb_ready">本地 ADB 已就绪</string>
     <string name="home_notification_enabled">已开启任务通知</string>
-    <string name="home_overlay_enabled">已开启悬浮窗权限</string>
     <string name="home_battery_ignored">已忽略电池优化</string>
     <string name="home_permission_enabled">已开启</string>
-    <string name="home_card_local_adb_title">输入配对码连接</string>
-    <string name="home_card_local_adb_subtitle">只需要配对码</string>
-    <string name="home_card_notification_title">任务通知</string>
-    <string name="home_card_notification_subtitle">显示运行状态</string>
-    <string name="home_card_system_window_title">系统窗口</string>
-    <string name="home_card_system_window_subtitle">悬浮窗显示操作面板</string>
-    <string name="home_card_battery_title">电池白名单</string>
-    <string name="home_card_battery_subtitle">防止后台被系统杀死</string>
-    <string name="home_card_storage_title">文件读写</string>
-    <string name="home_card_storage_subtitle">读写设备上的文件</string>
+    <string name="home_card_local_adb_title">Local ADB 连接</string>
+    <string name="home_card_local_adb_subtitle">自动化、截图与录屏的前提条件</string>
+    <string name="home_card_notification_title">通知权限</string>
+    <string name="home_card_notification_subtitle">接收配对码、任务进度与监控状态</string>
+    <string name="home_card_battery_title">电池优化</string>
+    <string name="home_card_battery_subtitle">长时间或息屏任务建议开启</string>
+    <string name="home_card_storage_title">所有文件访问</string>
+    <string name="home_card_storage_subtitle">仅 Android 10 及以下需要</string>
     <string name="home_storage_enabled">已获得文件读写权限</string>
-    <string name="home_enable_storage">请允许访问所有文件</string>
-    <string name="home_cancel_task">结束当前任务</string>
-    <string name="home_cancel_task_success">已结束当前AI任务</string>
-    <string name="home_no_task_running">当前没有进行中的任务</string>
+
+    <!-- 设置：权限分组 -->
+    <string name="settings_group_permissions">权限</string>
+    <string name="settings_perm_notif_access_title">通知使用权</string>
+    <string name="settings_perm_notif_access_subtitle">仅消息监控与自动回复需要</string>
+    <string name="settings_perm_advanced_title">高级权限</string>
+    <string name="settings_perm_summary_to_enable">%1$d 项待开启</string>
+    <string name="settings_perm_summary_recommended">%1$d 项建议开启</string>
+    <string name="settings_perm_summary_all_set">全部已就绪 ✓</string>
+    <string name="perm_status_ready">已就绪</string>
+    <string name="perm_status_not_ready">未就绪</string>
+    <string name="perm_status_connecting">连接中</string>
+    <string name="perm_status_connected">已连接</string>
+    <string name="perm_status_disconnected">已断开</string>
+    <string name="perm_status_allowed">已允许</string>
+    <string name="perm_status_not_allowed">未允许</string>
+    <string name="perm_status_disabled">未开启</string>
+    <string name="perm_status_unrestricted">不受限制</string>
+    <string name="perm_status_restricted">受限</string>
+    <string name="perm_status_not_needed">无需开启</string>
 
     <!-- 设置 -->
     <string name="settings_title">设置</string>
@@ -68,11 +71,20 @@
     <string name="sensitive_mode_enabled">敏感模式已开启</string>
     <string name="sensitive_mode_disabled">敏感模式已关闭</string>
     <string name="sensitive_mode_disable_title">关闭敏感模式？</string>
-    <string name="sensitive_mode_disable_message">关闭敏感模式将移除银行及金融类应用任务的所有安全限制。Agent 将不再拦截高风险操作、不再执行凭据保护、不再限制工具访问。请确认您已充分了解相关风险后再关闭。</string>
+    <string name="sensitive_mode_disable_message">敏感模式开启时，Agent 在执行支付、密码等高风险操作前会暂停任务，并弹出确认提示等待您在 30 秒内确认。关闭后，所有操作将不再询问、直接执行。请确认您已充分了解相关风险后再关闭。</string>
     <string name="sensitive_mode_disable_confirm">关闭</string>
+    <string name="sensitive_confirm_dialog_title">敏感操作确认</string>
+    <string name="sensitive_confirm_dialog_action">待确认的高风险操作</string>
+    <string name="sensitive_confirm_dialog_risk">风险类型</string>
+    <string name="sensitive_confirm_dialog_desc">Agent 即将执行上述高风险操作。确认后将继续执行；取消或倒计时结束未确认时，操作将被终止，任务以失败结束。</string>
+    <string name="sensitive_confirm_dialog_countdown">%1$s 后自动取消</string>
+    <string name="sensitive_confirm_risk_payment">支付</string>
+    <string name="sensitive_confirm_risk_password">密码 / PIN</string>
+    <string name="sensitive_confirm_risk_other">其他</string>
+    <string name="sensitive_confirm_dialog_approve">确认执行</string>
+    <string name="sensitive_confirm_dialog_deny">取消</string>
 
     <string name="local_adb_setup_title">本地 ADB 设置</string>
-    <string name="local_adb_setup_hint">127.0.0.1:连接端口 配对端口 配对码</string>
     <string name="local_adb_setup_action">配对 / 连接</string>
     <string name="local_adb_setup_invalid">请输入有效端口</string>
     <string name="local_adb_setup_success">本地 ADB 已连接</string>
@@ -103,18 +115,10 @@
     <string name="local_adb_notification_pairing">正在检测端口、配对并连接...</string>
     <string name="local_adb_notification_invalid_input">请只输入 6 位配对码</string>
     <string name="local_adb_notification_success_text">已配对并连接，可以返回 BQAAgent 继续测试</string>
+    <string name="local_adb_guide_content_desc">本地 ADB 配对说明</string>
+    <string name="local_adb_guide_title">如何配对本地 ADB</string>
+    <string name="local_adb_guide_message">首次使用请按以下步骤操作一次即可：\n\n1. 设置 → 关于手机 → 连续点击\"版本号\"7 次，开启开发者选项。\n2. 设置 → 开发者选项 → 无线调试 → 打开开关。\n3. 点击\"使用配对码配对设备\"，屏幕会显示 6 位配对码。\n4. 保持该弹窗打开，返回 BQAAgent 输入这 6 位配对码，端口会自动检测。\n5. 看到\"已配对并连接\"即完成。\n\n提示：只需输入 6 位配对码；在配对成功前请勿关闭系统配对弹窗。</string>
 
-    <!-- LLM 配置 -->
-    <string name="llm_config_title">LLM 配置</string>
-    <string name="llm_config_tip">请填写你的 LLM API Key、Base URL 和模型名称，数据仅保存在本地。</string>
-    <string name="llm_config_api_key">API Key</string>
-    <string name="llm_config_api_key_hint">如 sk-xxx（DeepSeek）或其它服务商的 Key</string>
-    <string name="llm_config_base_url">Base URL</string>
-    <string name="llm_config_base_url_hint">如 https://api.deepseek.com（留空则使用 DeepSeek 默认）</string>
-    <string name="llm_config_model_name">模型名称</string>
-    <string name="llm_config_model_name_hint">如 deepseek-v4-flash、deepseek-v4-pro</string>
-    <string name="llm_config_saved">LLM 配置已保存</string>
-    <string name="llm_config_api_key_required">请填写 API Key</string>
     <string name="menu_llm_config">LLM 配置</string>
 
     <!-- 设置菜单项 -->
@@ -122,14 +126,7 @@
     <string name="lan_config_stopped">已关闭</string>
     <string name="lan_config_no_wifi">请先连接 WiFi</string>
 
-    <!-- 协议弹窗 -->
-    <string name="protocol_agree_title">个人信息保护指引</string>
-    <string name="protocol_alert_title">服务协议和隐私保护</string>
-    <string name="protocol_disagree">不同意</string>
-    <string name="protocol_agree_continue">同意并继续</string>
-
     <!-- 悬浮窗 -->
-    <string name="floating_ai_label">AI</string>
     <string name="floating_task_received">已收到：\"%s\"</string>
 
     <!-- 前台服务通知 -->
@@ -145,23 +142,11 @@
     <string name="channel_msg_tool_failure">失败</string>
     <string name="channel_msg_tool_execution">[%1$s]：%2$s</string>
     <string name="channel_msg_task_error">遇到了错误：%s</string>
-    <string name="channel_msg_no_local_adb">本地 ADB 未连接，无法执行任务</string>
-    <string name="channel_msg_task_in_progress">有任务执行中，请稍候</string>
     <string name="channel_msg_system_dialog_blocked">可能有系统弹窗遮挡了屏幕，请检查并手动处理后重试</string>
 
     <!-- 本地 ADB 自动化 -->
     <string name="cd_back_button">返回</string>
     <string name="cd_settings">设置</string>
-    <string name="cd_clear_input">清除输入</string>
-    <string name="cd_checkbox">切换选中状态</string>
-    <string name="cd_selected">已选中</string>
-    <string name="cd_task_success">任务完成</string>
-    <string name="cd_task_error">任务失败</string>
-    <string name="cd_task_stopped">任务停止</string>
-    <string name="cd_task_cancelled">任务取消</string>
-    <string name="cd_channel_logo">渠道图标</string>
-    <string name="cd_empty_state">暂无数据</string>
-    <string name="cd_error_state">加载失败</string>
 
     <!-- Agent 服务 -->
     <string name="agent_local_adb_not_ready">本地 ADB 未就绪，无法执行任务</string>
@@ -211,4 +196,324 @@
     <string name="input_dialog_need_more">至少输入%d个字符</string>
     <string name="input_dialog_need_less">最多输入%d个字符</string>
     <string name="input_dialog_no_zero">请输入非零数值</string>
+    <!-- 批量任务 -->
+    <string name="batch_cd_batch_list">批量任务列表</string>
+    <string name="batch_tab_chat">对话</string>
+    <string name="batch_cd_settings">设置</string>
+    <string name="batch_action_rename">重命名</string>
+    <string name="batch_action_delete">删除</string>
+    <string name="batch_delete_title">删除批量任务？</string>
+    <string name="batch_rename_title">重命名批量任务</string>
+    <string name="batch_new">新建批量任务</string>
+    <string name="batch_recent">最近</string>
+    <string name="batch_recent_count">%1$d/%2$d · 满时自动移除最旧</string>
+    <string name="batch_empty_list">暂无批量任务</string>
+    <string name="batch_models">模型</string>
+    <string name="batch_workspace_empty">暂无任务 — 点击下方“添加任务”。</string>
+    <string name="batch_workspace_empty_skill">暂无任务 — 点击下方“添加任务”，或选择一个已录制的技能。</string>
+    <string name="batch_phase_none">无</string>
+    <string name="batch_cd_details">详情</string>
+    <string name="batch_add_task">添加任务</string>
+    <string name="batch_task_dialog_title">任务</string>
+    <string name="batch_task_placeholder">描述任务…</string>
+    <string name="batch_add">添加</string>
+    <string name="batch_from_skill">从技能选择</string>
+    <string name="batch_start">开始</string>
+    <string name="batch_precheck_title">运行前检查</string>
+    <string name="batch_precheck_checking">正在检查设备…</string>
+    <string name="batch_precheck_local_adb">本地 ADB</string>
+    <string name="batch_precheck_recording">录制</string>
+    <string name="batch_recording_on">已开启</string>
+    <string name="batch_recording_on_not_ready">已开启（设备未就绪）</string>
+    <string name="batch_precheck_free_space">可用空间</string>
+    <string name="batch_recording_off">已关闭</string>
+    <string name="batch_precheck_blocked">无法开始 — 请先解决上述问题。</string>
+    <string name="batch_precheck_ready_countdown">就绪，%1$d 秒后开始…</string>
+    <string name="batch_precheck_warning_prompt">发现告警，是否仍要继续执行？</string>
+    <string name="batch_settings_title">批量设置</string>
+    <string name="batch_setting_autosave_title">自动保存 / 更新技能</string>
+    <string name="batch_setting_autosave_subtitle">AI 运行后，更新匹配技能的模板</string>
+    <string name="batch_setting_prefer_replay_title">优先回放匹配的技能</string>
+    <string name="batch_setting_prefer_replay_subtitle">当找到匹配的技能时，优先回放而不是用 AI 运行</string>
+    <string name="batch_setting_reset_title">任务间重置</string>
+    <string name="batch_setting_reset_subtitle">下一个任务前强制停止上一个任务的目标应用</string>
+    <string name="batch_setting_stop_title">失败时停止</string>
+    <string name="batch_setting_stop_subtitle">当某个任务失败或停止时，中止整个批次</string>
+    <string name="batch_setting_interval_title">任务间隔</string>
+    <string name="batch_setting_interval_subtitle">任务结束后的空闲间隔（0–30 秒）</string>
+    <string name="batch_interval_value">%1$d秒</string>
+    <string name="batch_progress_completed">%1$d / %2$d 已完成</string>
+    <string name="batch_phase_pending">等待中</string>
+    <string name="batch_phase_running">运行中</string>
+    <string name="batch_phase_skipped_adb">已跳过</string>
+    <string name="batch_phase_timeout">已超时</string>
+    <string name="batch_phase_abandoned">已放弃</string>
+    <string name="batch_status_success">成功</string>
+    <string name="batch_status_failed">失败</string>
+    <string name="batch_status_stopped">已停止</string>
+    <string name="batch_status_cancelled">已取消</string>
+    <string name="batch_status_done">完成</string>
+    <string name="batch_status_reply">回复</string>
+    <string name="batch_back">返回</string>
+    <string name="batch_detail_empty">该任务暂无详情记录。</string>
+    <string name="batch_detail_task_header">任务 %1$d</string>
+    <string name="batch_start_over">重新执行</string>
+    <string name="batch_continue">继续执行</string>
+    <string name="batch_stopping">停止中…</string>
+    <string name="batch_rerun_title">重置已有结果？</string>
+    <string name="batch_rerun_message">部分任务已有执行结果。重新执行会清空这些结果，并从第一个任务开始全部重跑。</string>
+    <string name="batch_execution_steps">执行步骤</string>
+    <string name="batch_replay_steps">回放步骤</string>
+    <string name="batch_step_running">进行中</string>
+    <string name="batch_step_duration">耗时 %1$s</string>
+    <string name="batch_step_tokens">%1$s tokens</string>
+    <string name="batch_step_intent">意图：%1$s</string>
+    <string name="batch_step_params">参数：%1$s</string>
+    <string name="batch_view_recording">查看录像</string>
+    <string name="batch_result_success">任务成功</string>
+    <string name="batch_result_failed">任务失败</string>
+    <string name="batch_result_stopped">任务已停止</string>
+    <string name="batch_result_cancelled">任务已取消</string>
+    <string name="batch_skill_picker_title">从技能库添加</string>
+    <string name="batch_skill_picker_empty">暂无已录制的技能。</string>
+    <string name="batch_skill_search_hint">搜索技能…</string>
+    <string name="batch_skill_search_no_match">未找到匹配的技能。</string>
+    <string name="batch_skill_steps">%1$d 个步骤</string>
+    <string name="batch_skill_no_template">无模板</string>
+    <string name="batch_cd_skill_details">技能详情</string>
+    <string name="batch_precheck_block_no_adb">本地 ADB 未连接。请先开启无线调试并配对 BQAAgent。</string>
+    <string name="batch_precheck_warn_adb_no_answer">本地 ADB 未响应探测。它可能会重连，但任务可能被跳过。</string>
+    <string name="batch_precheck_block_no_task">请至少添加一个任务以运行批次。</string>
+    <string name="batch_precheck_block_no_model">未启用任何模型。请先在设置中启用本地或云端模型。</string>
+    <string name="batch_precheck_warn_low_space">可用空间低于录制所需的最小值，录像可能被丢弃。</string>
+    <string name="batch_precheck_warn_near_cap">录制存储接近 %1$s 上限，最旧的录像将被清理。</string>
+    <string name="batch_precheck_warn_skill_near_cap">自动保存已开启：当前技能库为 %1$d/%2$d。本批次 %3$d 个任务在最坏情况下都会新增技能，可能超出上限，届时部分技能将被放弃保存。</string>
+    <string name="batch_delete_task_title">删除此任务？</string>
+    <string name="batch_delete_task_message">任务 %1$d 将从本批次中移除。</string>
+
+    <string name="chat_cd_menu">菜单</string>
+    <string name="chat_tab_batch">批量</string>
+    <string name="chat_action_rename">重命名</string>
+    <string name="chat_action_delete">删除</string>
+    <string name="chat_delete_title">删除会话？</string>
+    <string name="chat_rename_title">重命名会话</string>
+    <string name="chat_new">新建对话</string>
+    <string name="chat_recent">最近</string>
+    <string name="chat_recent_count">%1$d/%2$d · 满时自动移除最旧会话</string>
+    <string name="chat_empty_list">暂无会话</string>
+    <string name="chat_models">模型</string>
+    <string name="chat_monitoring_one">监控中：%1$s</string>
+    <string name="chat_monitoring_many">%1$d 个监控中</string>
+    <string name="chat_collapse">收起</string>
+    <string name="chat_expand">展开</string>
+    <string name="chat_stop">停止</string>
+    <string name="chat_stop_all">全部停止</string>
+
+    <string name="chat_mode_chat">对话</string>
+    <string name="chat_mode_task">任务</string>
+    <string name="chat_hint_task">描述一个手机任务…</string>
+    <string name="chat_hint_unified">聊天或下达任务…</string>
+    <string name="chat_hint_chat">与本地 AI 聊天…</string>
+    <string name="chat_cd_send">发送</string>
+    <string name="chat_cd_waiting">等待回复</string>
+    <string name="chat_voice_model_loading">语音模型加载中…</string>
+    <string name="chat_voice_recognize_failed">识别失败：%1$s</string>
+    <string name="chat_voice_hold_to_talk">长按说话</string>
+    <string name="chat_voice_perm_granted">麦克风权限已授予，再次点击麦克风即可语音输入</string>
+    <string name="chat_voice_perm_denied">麦克风权限被拒绝，无法使用语音输入</string>
+    <string name="chat_model_none">未选择模型</string>
+    <string name="chat_cd_switch_model">切换模型</string>
+    <string name="chat_model_current">当前模型</string>
+    <string name="chat_model_phone">手机模型</string>
+    <string name="chat_model_online">在线模型</string>
+    <string name="chat_model_usage">用量</string>
+    <string name="chat_model_phone_group">手机模型</string>
+    <string name="chat_model_on_device">设备端 Gemma 4</string>
+    <string name="chat_model_active">当前</string>
+    <string name="chat_model_no_phone">无手机模型</string>
+    <string name="chat_model_download_hint">下载 Gemma 4 E2B 或 E4B</string>
+    <string name="chat_model_open">打开</string>
+    <string name="chat_model_online_group">在线模型</string>
+    <string name="chat_model_online_setup">需配置在线模型</string>
+    <string name="chat_model_configure_hint">配置 API 密钥与模型</string>
+    <string name="chat_model_manage">管理模型</string>
+
+    <!-- Chat: messages & task cards (Phase 3) -->
+    <string name="chat_action_copy">复制</string>
+    <string name="chat_select_text">选择文本</string>
+    <string name="chat_copy_all">复制全部</string>
+    <string name="chat_done">完成</string>
+    <string name="chat_copied">已复制</string>
+    <string name="chat_screenshot_required">需要截图</string>
+    <string name="chat_screenshot_required_desc">当前界面受保护，请截图并上传以继续。</string>
+    <string name="chat_skip">跳过</string>
+    <string name="chat_upload">上传</string>
+    <!-- 批量任务：截图上传兜底弹窗 -->
+    <string name="batch_image_dialog_title">需要截图才能继续</string>
+    <string name="batch_image_dialog_task">当前任务 #%1$d</string>
+    <string name="batch_image_dialog_reason">自动截屏失败（目标界面可能受保护，或截屏命令异常），AI 需要一张当前屏幕的图片才能判断下一步操作。</string>
+    <string name="batch_image_dialog_action">请上传目标 App 的当前截图；若无法提供，可点击“跳过”，AI 将尝试在没有截图的情况下继续。</string>
+    <string name="batch_image_dialog_countdown">将在 %1$s 后自动跳过</string>
+    <string name="chat_task_succeeded">任务成功</string>
+    <string name="chat_task_failed">任务失败</string>
+    <string name="chat_task_stopped">任务已停止</string>
+    <string name="chat_task_cancelled">任务已取消</string>
+    <string name="chat_view_recording">查看录屏</string>
+    <string name="chat_execution_steps">执行步骤</string>
+    <string name="chat_downloading_title">正在下载你的 AI 大脑</string>
+    <string name="chat_downloading_subtitle">仅需下载一次</string>
+    <string name="chat_empty_subtitle">聊天或执行任务，直接输入你的需求。</string>
+
+    <string name="chat_workflows_title">工作流</string>
+    <string name="chat_workflows_subtitle">由 AI 驱动的后台任务——单条指令无法完成的事。</string>
+    <string name="chat_workflows_experimental">实验性功能——更多工作流即将推出</string>
+    <string name="chat_skill_monitor_title">消息监控</string>
+    <string name="chat_skill_monitor_desc">在后台自动回复某人的消息</string>
+    <string name="chat_skill_send_title">发送消息</string>
+    <string name="chat_skill_send_desc">通过任意聊天应用给某人发送消息</string>
+    <string name="chat_running_in_background">后台运行中</string>
+    <string name="chat_monitor_dialog_title">监控与自动回复</string>
+    <string name="chat_monitor_target">目标</string>
+    <string name="chat_monitor_target_hint">例如：妈妈、+1 555 123 4567</string>
+    <string name="chat_monitor_app">应用</string>
+    <string name="chat_monitor_tone">语气</string>
+    <string name="chat_monitor_start">开始监控</string>
+    <string name="chat_send_hint_prefix">使用更强的 LLM，你可以直接输入：</string>
+    <string name="chat_send_hint_example">\"在 WhatsApp 上给妈妈发个招呼\"</string>
+    <string name="chat_send_word_send">"发送 "</string>
+    <string name="chat_send_word_to">"给 "</string>
+    <string name="chat_send_word_on">" 通过 "</string>
+    <string name="chat_send_ph_message">消息</string>
+    <string name="chat_send_ph_name">名字</string>
+    <string name="chat_action_send">发送</string>
+
+    <!-- Chat: image picker toasts (Phase 5) -->
+    <string name="chat_image_invalid_type">⚠️ 请选择图片文件（PNG、JPEG、WebP）。</string>
+    <string name="chat_image_too_large">⚠️ 图片过大（%1$dMB），最大支持 20MB。</string>
+    <string name="chat_image_too_small">⚠️ 图片过小，请上传完整屏幕截图。</string>
+    <string name="chat_image_upload_soon">图片上传功能即将推出</string>
+
+    <!-- OCR: 图片识别提取任务 -->
+    <string name="ocr_cd_button">从图片提取文字</string>
+    <string name="ocr_choose_source">选择图片来源</string>
+    <string name="ocr_choose_camera">拍照</string>
+    <string name="ocr_choose_gallery">从相册选取</string>
+    <string name="ocr_camera_perm_denied">相机权限被拒绝，无法拍照</string>
+    <string name="ocr_camera_failed">打开相机失败</string>
+    <string name="ocr_storage_unavailable">存储不可用</string>
+    <string name="ocr_image_error">图片文字识别失败</string>
+    <string name="ocr_error_blurry">图片模糊，无法识别其中的文字</string>
+    <string name="ocr_error_no_task">未识别出有效的任务描述</string>
+    <string name="ocr_vlm_not_configured">视觉模型未配置，请先在设置中配置</string>
+    <string name="ocr_recognizing">正在识别任务信息…</string>
+    <string name="ocr_recognizing_hint">请稍候，不要离开当前页面</string>
+
+    <!-- Skill save / replay overlay (Phase 5) -->
+    <string name="skill_save_update_template_title">更新模板？</string>
+    <string name="skill_save_learn_template_title">学习新模板？</string>
+    <string name="skill_save_update_template_desc">本次任务通过 AI 智能体重新运行了技能「%1$s」。请检查录制的步骤并保存，以更新它的执行模板。</string>
+    <string name="skill_save_match_template_desc">本次任务匹配到已有技能「%1$s」。请检查录制的步骤并将其保存为该技能的新执行模板。</string>
+    <string name="skill_save_offer_title">保存为技能？</string>
+    <string name="skill_save_offer_desc">本次任务由 AI 智能体完成。将其保存为可复用的技能，下次运行更快。</string>
+    <string name="skill_save_task_label">任务：%1$s</string>
+    <string name="skill_save_not_now">暂不</string>
+    <string name="skill_save_review_template">检查模板</string>
+    <string name="skill_save_as_skill">保存为技能</string>
+    <string name="skill_save_confirm_template_title">确认模板</string>
+    <string name="skill_save_confirm_skill_title">确认技能</string>
+    <string name="skill_save_title_label">技能标题（可编辑）</string>
+    <string name="skill_save_steps_review">步骤（%1$d）· 保存前请检查</string>
+    <string name="skill_save_confirm_save_template">确认并保存模板</string>
+    <string name="skill_save_confirm_save_skill">确认并保存技能</string>
+    <string name="skill_save_same_as_above">（同上）</string>
+    <string name="skill_save_chip_new_template">新模板</string>
+    <string name="skill_save_chip_new_skill">新技能</string>
+    <string name="skill_save_saving_template">正在保存模板…</string>
+    <string name="skill_save_saving_skill">正在保存技能…</string>
+    <string name="skill_save_success_template">✅ 模板已保存</string>
+    <string name="skill_save_success_skill">✅ 技能已保存</string>
+    <string name="skill_save_success_template_desc">已为「%1$s」添加新模板</string>
+    <string name="skill_save_success_skill_desc">已保存为：%1$s</string>
+    <string name="skill_save_fail_title">❌ 保存失败</string>
+    <string name="skill_save_retry">重试</string>
+    <string name="skill_limit_title">🗂️ 已达技能上限</string>
+    <string name="skill_limit_message">你已保存 %1$d/%2$d 个技能——已达上限，因此本次任务暂时无法保存为新技能。\n\n请在技能管理中删除不再需要的技能，然后返回再次点击保存。</string>
+    <string name="skill_limit_open_management">打开技能管理</string>
+    <string name="skill_manager_summary">已保存 %1$d/%2$d 个技能\n达到上限后，将无法再把任务保存为新技能。</string>
+    <string name="skill_manager_warning">技能库接近满载——已使用 %1$d/%2$d。达到上限后，新的任务将无法保存为新技能，建议删除不再需要的技能。</string>
+    <string name="skill_replay_confirm_title">确认回放</string>
+    <string name="skill_replay_steps_recorded">步骤（%1$d）· 录制模板</string>
+    <string name="skill_replay_steps_substituted">步骤（%1$d）· 红色值为本次运行替换</string>
+    <string name="skill_replay_use_ai">改用 AI</string>
+    <string name="skill_replay_confirm_button">确认并回放</string>
+    <string name="skill_replay_chip">回放</string>
+    <string name="skill_replay_task_description">任务描述</string>
+    <string name="common_back">返回</string>
+
+    <!-- Monitor permission guide sheet -->
+    <string name="monitor_unknown_target">没能识别要监控的对象，试试：\"监控 WhatsApp 上的妈妈\"</string>
+    <string name="monitor_setting_up">正在为 %2$s 上的 %1$s 设置自动回复…</string>
+    <string name="monitor_active">%1$s 的自动回复已生效。\n正在后台监控，可随时通过上方栏停止。</string>
+    <string name="monitor_guide_title">开启监控前需设置</string>
+    <string name="monitor_guide_subtitle">完成以下授权后，BQAAgent 才能自动回复 %1$s</string>
+    <string name="monitor_guide_row_adb_title">Local ADB 连接</string>
+    <string name="monitor_guide_row_adb_desc">必需 — 用于在本机发送回复</string>
+    <string name="monitor_guide_row_notif_access_desc">必需 — 读取新消息以触发自动回复</string>
+    <string name="monitor_guide_row_notif_perm_title">通知权限</string>
+    <string name="monitor_guide_row_notif_perm_desc">必需 — 保持后台监控服务运行</string>
+    <string name="monitor_guide_row_battery_title">电池优化</string>
+    <string name="monitor_guide_row_battery_desc">可选 — 提升后台运行稳定性</string>
+    <string name="monitor_guide_action_setup">去开启</string>
+    <string name="monitor_guide_action_allow">允许</string>
+    <string name="monitor_guide_optional">可选</string>
+    <string name="monitor_guide_waiting">等待授权完成…全部就绪后将自动开始监控</string>
+    <string name="monitor_guide_start">开始监控</string>
+
+    <!-- Settings: floating window & overlay unification -->
+    <string name="settings_perm_overlay_title">显示在其他应用上层</string>
+    <string name="settings_perm_overlay_subtitle">允许在其他应用上层显示内容</string>
+    <string name="settings_floating_window_subtitle">任务运行时显示悬浮状态球</string>
+    <string name="settings_floating_window_title">悬浮窗</string>
+    <string name="settings_state_enabled">已开启</string>
+    <string name="settings_state_disabled">已关闭</string>
+    <string name="settings_floating_window_no_overlay">已开启 · 缺系统权限</string>
+    <string name="settings_floating_window_enabled_toast">悬浮窗已开启</string>
+    <string name="settings_floating_window_disabled_toast">悬浮窗已关闭</string>
+    <string name="settings_floating_window_overlay_hint">悬浮窗已开启 — 授予\"显示在其他应用上层\"后才会显示</string>
+    <string name="settings_perm_overlay_needed_by_floating">悬浮窗开关需要此权限</string>
+    <string name="settings_perm_overlay_already_granted">已授予该权限</string>
+
+    <!-- Chat: capability banner -->
+    <string name="chat_banner_adb_disconnected">Local ADB 已断开 — 点击修复</string>
+    <string name="chat_banner_adb_not_ready">Local ADB 未就绪 — 点击设置</string>
+
+    <!-- P4: pairing notification gate & guide -->
+    <string name="local_adb_pair_notif_perm_blocked">BQAAgent 的通知已被禁止 — 需允许通知才能收到配对码</string>
+    <string name="guide_more_hint">悬浮窗、电池白名单、文件访问都不是必需项 — 各功能需要时会在现场引导你开启（设置 → 高级）。</string>
+
+    <!-- Settings: i18n cleanup -->
+    <string name="settings_group_general">通用</string>
+    <string name="settings_vision_model_title">视觉模型</string>
+    <string name="settings_voice_input_title">语音输入</string>
+    <string name="settings_group_skill_management">技能管理</string>
+    <string name="settings_skill_capture_mode_title">技能捕获模式</string>
+    <string name="settings_skill_data_title">技能数据</string>
+    <string name="settings_skill_data_count">已保存 %1$d/%2$d</string>
+    <string name="settings_task_recording_title">任务录制</string>
+    <string name="settings_task_recording_enable_title">启用录制</string>
+    <string name="settings_recorded_files_title">录制文件</string>
+    <string name="settings_task_recording_adb_off">已开启 · ADB 未连接</string>
+    <string name="settings_task_recording_issue">已开启 · 异常</string>
+    <string name="settings_recordings_files_count">%1$d 个文件</string>
+    <string name="settings_recording_disabled_toast">任务录制已关闭</string>
+    <string name="settings_recording_adb_required_title">需要 Local ADB</string>
+    <string name="settings_recording_adb_required_message">任务录制与自动化共用同一条 Local ADB 通道。\n\n请先连接 Local ADB（权限 → Local ADB），再开启录制。</string>
+    <string name="settings_recording_checking_toast">正在检查此设备</string>
+    <string name="settings_recording_stop_task_toast">请先停止正在运行的任务</string>
+    <string name="settings_skill_capture_on_title">技能捕获模式已开启</string>
+    <string name="settings_skill_capture_on_message">开启后任务不依赖聊天历史独立运行，完成的任务可被录制并保存为可复用的技能。\n\n注意：请在一个消息中描述完整任务，后续追问不会接续上一个任务。</string>
+    <string name="settings_skill_capture_off_toast">技能捕获模式已关闭：任务恢复跟随聊天历史，技能保存停用</string>
+    <string name="common_got_it">知道了</string>
+    <string name="settings_sensitive_mode_subtitle">触及支付、密码等界面前先确认</string>
+
 </resources>

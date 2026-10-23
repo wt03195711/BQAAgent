@@ -84,7 +84,7 @@ public class SecureKeypadInputTool extends BaseTool {
             if (!typeDigitsWithKeyEvents(driver, digits)) {
                 return ToolResult.error("Failed to enter secure keypad digits with Android numeric key events.");
             }
-            SecureLoginState keyEventState = waitForPostPinState(driver, postWaitMs);
+            SecureLoginState keyEventState = waitForPostPinState(driver, Math.min(postWaitMs, 3000));
             if (keyEventState == SecureLoginState.OTHER || keyEventState == SecureLoginState.LOADING) {
                 return ToolResult.success("Entered " + digits.length() +
                         " secure keypad digit(s) using key_events. Post-entry state=" + keyEventState + ".");
@@ -101,14 +101,25 @@ public class SecureKeypadInputTool extends BaseTool {
             clearFocusedSecureInput(driver);
         }
 
+        if (!"standard_3x4".equals(layout)) {
+            driver.getScreenTree("actionable");
+        }
+
         Map<Character, int[]> inferredGrid = "standard_3x4".equals(layout)
                 ? new HashMap<>()
-                : inferClickableGrid(driver);
+                : inferClickableGridFromCache(driver);
 
         int entered = 0;
         String method = "visible_nodes";
         for (char digit : digits.toCharArray()) {
-            int[] xy = "standard_3x4".equals(layout) ? null : findDigitCoordinates(driver, digit);
+            int[] xy;
+            if ("standard_3x4".equals(layout)) {
+                xy = null;
+            } else if (entered == 0) {
+                xy = findDigitCoordinates(driver, digit);
+            } else {
+                xy = findDigitCoordinatesFromCache(driver, digit);
+            }
             if (xy == null) {
                 xy = inferredGrid.get(digit);
                 method = "inferred_grid";
@@ -142,7 +153,7 @@ public class SecureKeypadInputTool extends BaseTool {
     }
 
     private void clearFocusedSecureInput(LocalAdbDeviceDriver driver) {
-        driver.clearFocusedText(24);
+        driver.clearFocusedText(12);
         sleep(180);
     }
 
@@ -227,9 +238,20 @@ public class SecureKeypadInputTool extends BaseTool {
         return true;
     }
 
-    private Map<Character, int[]> inferClickableGrid(LocalAdbDeviceDriver driver) {
+    private int[] findDigitCoordinatesFromCache(LocalAdbDeviceDriver driver, char digit) {
+        List<UiNode> nodes = driver.findNodesByText(String.valueOf(digit), false);
+        if (nodes.isEmpty()) return null;
+        int[] size = getScreenSize();
+        UiNode best = nodes.stream()
+                .filter(node -> isKeypadCandidate(node, size))
+                .max(Comparator.comparingInt(node -> node.getClickable() ? 2 : 1))
+                .orElse(null);
+        if (best == null) return null;
+        return new int[]{best.getCenterX(), best.getCenterY()};
+    }
+
+    private Map<Character, int[]> inferClickableGridFromCache(LocalAdbDeviceDriver driver) {
         Map<Character, int[]> result = new HashMap<>();
-        try { driver.getScreenTree("actionable"); } catch (Exception ignored) {}
 
         int[] size = getScreenSize();
         List<UiNode> candidates = new ArrayList<>();
@@ -312,10 +334,14 @@ public class SecureKeypadInputTool extends BaseTool {
     private SecureLoginState waitForPostPinState(LocalAdbDeviceDriver driver, long maxWaitMs) {
         long deadline = System.currentTimeMillis() + maxWaitMs;
         SecureLoginState last = SecureLoginState.OTHER;
+        long interval = 500;
         while (System.currentTimeMillis() <= deadline) {
             last = detectSecureLoginState(driver);
             if (last == SecureLoginState.OTHER || last == SecureLoginState.LOGIN_BUTTON) return last;
-            sleep(1000);
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) break;
+            sleep(Math.min(interval, remaining));
+            interval = Math.min(interval + 200, 2000);
         }
         return last;
     }

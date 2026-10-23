@@ -58,6 +58,8 @@ class ChatSessionController(
 
     private var cloudClient: LlmClient? = null
     private var cloudModelName: String? = null
+    private var cloudApiKey: String? = null
+    private var cloudBaseUrl: String? = null
     private val cloudHistory = mutableListOf<dev.langchain4j.data.message.ChatMessage>()
     private var activeConversationId: String = "chat"
     private var localUiGeneration: Long = 0
@@ -87,6 +89,8 @@ class ChatSessionController(
                     return
                 }
                 cloudModelName = cloudConfig.modelName
+                cloudApiKey = cloudConfig.apiKey
+                cloudBaseUrl = cloudConfig.resolvedBaseUrl
                 if (previousModel == null || cloudHistory.isEmpty()) {
                     rebuildCloudHistoryFromVisibleMessages()
                 } else if (previousModel != cloudConfig.modelName) {
@@ -686,7 +690,12 @@ class ChatSessionController(
             isModelReady = false
         }
         loadedModelPath = null
-        if (cloudClient == null || cloudModelName != cloud.modelName || !isModelReady) {
+        if (cloudClient == null ||
+            cloudModelName != cloud.modelName ||
+            cloudApiKey != cloud.apiKey ||
+            cloudBaseUrl != cloud.baseUrl ||
+            !isModelReady
+        ) {
             loadModelIfReady()
             return
         }

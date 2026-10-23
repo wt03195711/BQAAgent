@@ -143,6 +143,20 @@ object LocalAdbDeviceDriver {
         return result.isSuccess
     }
 
+    /**
+     * Force-stop a package so the next task starts from a clean process state (batch inter-task
+     * reset). Mirrors [openApp]: same exec helper, same quoting, same cache invalidation. Callers
+     * must exclude this app's own package and system-dialog packages (see the batch reset policy).
+     */
+    @JvmStatic
+    fun closeApp(packageName: String): Boolean {
+        if (packageName.isBlank()) return false
+        val quoted = shellQuote(packageName)
+        val result = LocalAdbAutomation.exec("am force-stop $quoted", 10_000L)
+        if (result.isSuccess) invalidateScreenCache("close_app")
+        return result.isSuccess
+    }
+
     @JvmStatic
     fun openUrl(url: String, packageName: String?): Boolean {
         val normalizedUrl = normalizeUrl(url)
@@ -248,7 +262,7 @@ object LocalAdbDeviceDriver {
             }
         }
 
-        // Fallback: ADB 未找到匹配节点时，从预定义配置中查找
+        // Fallback: when ADB finds no matching node, look it up in the predefined registry
         if (matched.isEmpty()) {
             val fallbackNodes = FallbackRegistry.getInstance().queryByFuzzyText(text)
             if (fallbackNodes.isNotEmpty()) {
@@ -266,24 +280,6 @@ object LocalAdbDeviceDriver {
             node.nodeId.removePrefix("n").toIntOrNull() ?: Int.MAX_VALUE
         }
     }
-
-//    @JvmStatic
-//    fun currentMappedNodes(): List<UiNode> {
-//        val nodes = nodeIdMap.values.sortedBy { node ->
-//            node.nodeId.removePrefix("n").toIntOrNull() ?: Int.MAX_VALUE
-//        }
-//
-//        // Fallback: 当 ADB 节点数过少（dump 不完整）时，追加预定义配置中的组件
-//        if (nodes.size < BAD_TREE_MIN_NODES) {
-//            val fallbackNodes = FallbackRegistry.getInstance().queryAllForCurrentApp()
-//            if (fallbackNodes.isNotEmpty()) {
-//                XLog.i(TAG, "currentMappedNodes fallback supplement: ${fallbackNodes.size} node(s) added")
-//                return nodes + fallbackNodes
-//            }
-//        }
-//
-//        return nodes
-//    }
 
     @JvmStatic
     fun findRecentLogcatLinesContaining(
@@ -382,10 +378,10 @@ object LocalAdbDeviceDriver {
     }
 
     /**
-     * 获取当前前台 Activity 的全限定类名。
-     * 通过 dumpsys window 获取，用于 FallbackRegistry 的页面级过滤。
+     * Returns the fully-qualified class name of the current foreground Activity.
+     * Obtained via dumpsys window; used for FallbackRegistry page-level filtering.
      *
-     * @return Activity 类名（如 "com.hsbc.hkmb.app.ui.transfer.ConfirmActivity"），获取失败返回空字符串
+     * @return the Activity class name (e.g. "com.hsbc.hkmb.app.ui.transfer.ConfirmActivity"), or an empty string on failure
      */
     @JvmStatic
     fun activeActivityName(): String {
@@ -743,7 +739,6 @@ object LocalAdbDeviceDriver {
             append(buildHeader(ScreenInfoMode.FULL, snapshotId, nodes))
             if (!quality.ok) {
                 append("quality=").append(quality.reason).append(" addressable=").append(quality.addressableCount).append('\n')
-                // Deleted:append("quality=").append(quality.reason).append(" chars=").append(quality.outputChars).append('\n')
             }
             for (node in nodes) {
                 appendNodeLine(node, includeClass = true, includeBounds = true, full = true)
@@ -907,8 +902,8 @@ object LocalAdbDeviceDriver {
     }
 
     /**
-     * 升级为 UiAutomator2 --compressed 压缩抓取，无临时文件IO，速度更快、XML体积更小
-     * Android 8.0+ 支持，低版本自动降级 v1 旧方案
+     * Upgraded to UiAutomator2 --compressed capture: no temp-file IO, faster and smaller XML.
+     * Supported on Android 8.0+; lower versions automatically fall back to the legacy v1 approach.
      */
     private fun dumpWindowXml(timeoutMs: Long = DEFAULT_TIMEOUT_MS): String? {
         val appContext = ClawApplication.instance.applicationContext
@@ -917,17 +912,17 @@ object LocalAdbDeviceDriver {
         val tempXmlFile = File(cacheDir, "ui_dump_temp.xml")
         val tempPath = shellQuote(tempXmlFile.absolutePath)
 
-        // ========== UiAutomator2 优先：使用 --compressed 压缩输出（v2专属） ==========
+        // ========== UiAutomator2 first: use --compressed output (v2 only) ==========
         val uia2Command = "uiautomator dump --compressed $tempPath && cat $tempPath"
         val uia2Result = LocalAdbAutomation.exec(uia2Command, timeoutMs)
         if (uia2Result.isSuccess && uia2Result.stdout.isNotBlank()) {
-            // 抓取成功，删除临时文件，返回压缩XML文本
+            // Capture succeeded: delete the temp file and return the compressed XML text
             runCatching { tempXmlFile.delete() }
             return uia2Result.stdout
         }
         XLog.w(TAG, "UiAutomator2 compressed dump failed, fallback to old uiautomator v1")
 
-        // ========== 降级兜底：原生 uiautomator v1 方案 ==========
+        // ========== Fallback: native uiautomator v1 approach ==========
         val v1Command = "uiautomator dump $tempPath && cat $tempPath"
         val v1Result = LocalAdbAutomation.exec(v1Command, timeoutMs)
         runCatching { tempXmlFile.delete() }
@@ -953,7 +948,7 @@ object LocalAdbDeviceDriver {
                 return emptyList()
             }
 
-            // 核心修复：截断头部无关dump提示文字，只保留<?xml开头及之后内容
+            // Core fix: truncate the irrelevant dump header text, keeping only content from <?xml onward
             val xmlStartIndex = rawText.indexOf("<?xml")
             if (xmlStartIndex == -1) {
                 XLog.w(TAG, "No <?xml header found in ui dump text")
@@ -961,9 +956,9 @@ object LocalAdbDeviceDriver {
             }
             var cleanXml = rawText.substring(xmlStartIndex)
 
-            // 仅清理换行、制表符，不破坏标签与文字内部空格
+            // Only strip newlines and tabs; do not break spaces inside tags or text
             cleanXml = cleanXml.replace(Regex("[\\n\\t]"), "")
-            // 连续多个空格压缩为单个，避免大量空白子节点
+            // Collapse consecutive spaces into one to avoid many blank child nodes
             cleanXml = cleanXml.replace(Regex(" {2,}"), " ")
 
             val factory = DocumentBuilderFactory.newInstance().apply {
@@ -976,7 +971,7 @@ object LocalAdbDeviceDriver {
                 } catch (_: Exception) {
                 }
             }
-            // 使用截断清洗后的纯XML解析
+            // Parse the truncated, cleaned pure XML
             val inputStream = cleanXml.byteInputStream(Charsets.UTF_8)
             val doc = factory.newDocumentBuilder().parse(inputStream)
             inputStream.close()

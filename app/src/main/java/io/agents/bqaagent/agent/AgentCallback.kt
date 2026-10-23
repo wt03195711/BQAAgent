@@ -36,4 +36,19 @@ interface AgentCallback {
      * @return absolute path to user-uploaded image, or null if skipped/timed out
      */
     fun onScreenshotBlocked(round: Int, intent: String, timeoutMs: Long): String?
+
+    /**
+     * Called when the sensitive-confirm gate is raised (AI-judged gate tool or a hard-gate
+     * tool such as secure_keypad_input / input_amount). Blocks the agent thread until the
+     * user approves/denies or the timeout elapses.
+     *
+     * Default implementation auto-approves so non-UI callers (tests, channels) keep working.
+     *
+     * @param round current iteration
+     * @param actionSummary human-readable summary of the risky action
+     * @param riskType "payment" | "password" | other free-form label
+     * @param timeoutMs max wait time in milliseconds
+     * @return true if the user approved, false if denied/timed out
+     */
+    fun onSensitiveConfirm(round: Int, actionSummary: String, riskType: String, timeoutMs: Long): Boolean = true
 }

@@ -4,7 +4,11 @@
 package io.agents.bqaagent.ui.chat
 
 import android.content.Context
+import android.util.Base64
+import com.google.gson.Gson
 import io.agents.bqaagent.TaskStatus
+import io.agents.bqaagent.ui.batch.BatchConfig
+import io.agents.bqaagent.ui.batch.BatchUiMode
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -41,16 +45,23 @@ object ChatHistoryManager {
     private const val MESSAGE_RECORDING_SUFFIX = " -->"
     private const val MESSAGE_STATUS_PREFIX = "<!-- bqaagent:status="
     private const val MESSAGE_STATUS_SUFFIX = " -->"
+    private const val MESSAGE_REASON_PREFIX = "<!-- bqaagent:reason="
+    private const val MESSAGE_REASON_SUFFIX = " -->"
     private val frontmatterDateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
 
-    /** Maximum number of conversations retained on disk; the least-recently-accessed are pruned beyond this. */
+    /** Compact (single-line) JSON — never pretty-print, newlines would break line-based parsing. */
+    private val gson = Gson()
+
+    /** Maximum number of conversations retained on disk PER MODE; chat and batch each get 100. */
     const val MAX_CONVERSATIONS = 100
 
     data class ConversationSummary(
         val id: String,
         val title: String,
         val created: Long,
-        val file: File
+        val file: File,
+        /** "chat" (default) or "batch" — the two lists are filtered and retained independently. */
+        val mode: String = BatchUiMode.CHAT,
     )
 
     private fun getChatDir(context: Context): File {
@@ -62,8 +73,17 @@ object ChatHistoryManager {
     /**
      * Save a conversation to markdown file.
      */
-    fun save(context: Context, conversationId: String, messages: List<ChatMessage>, model: String) {
-        if (messages.isEmpty()) return
+    fun save(
+        context: Context,
+        conversationId: String,
+        messages: List<ChatMessage>,
+        model: String,
+        mode: String = BatchUiMode.CHAT,
+        batchConfig: BatchConfig? = null,
+    ) {
+        // An empty message list is a no-op for chat, but a BATCH conversation may legitimately be empty
+        // (the user deleted the last task) so the empty state persists like chat's "Untitled".
+        if (messages.isEmpty() && mode != BatchUiMode.BATCH) return
 
         val dir = getChatDir(context)
         // Match the target file by conversation id (frontmatter) so a save ALWAYS rewrites the same
@@ -79,14 +99,21 @@ object ChatHistoryManager {
         val title = (customTitle ?: firstUserMsg?.content?.take(80))
             ?.replace(Regex("\\s+"), " ")?.trim()?.takeIf { it.isNotEmpty() } ?: "Untitled"
 
+        val createdTs = messages.firstOrNull()?.timestamp ?: System.currentTimeMillis()
         val sb = StringBuilder()
         // Frontmatter
         sb.appendLine("---")
         sb.appendLine("id: $conversationId")
         sb.appendLine("title: $title")
         if (isCustomTitle) sb.appendLine("title_custom: true")
-        sb.appendLine("created: ${SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(Date(messages.first().timestamp))}")
+        sb.appendLine("created: ${SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(Date(createdTs))}")
         sb.appendLine("model: $model")
+        if (mode != BatchUiMode.CHAT) {
+            sb.appendLine("mode: $mode")
+        }
+        if (mode == BatchUiMode.BATCH) {
+            sb.appendLine("batch_config: ${gson.toJson(batchConfig ?: BatchConfig())}")
+        }
         sb.appendLine("---")
         sb.appendLine()
 
@@ -111,6 +138,9 @@ object ChatHistoryManager {
                     }
                     msg.taskStatus?.let {
                         sb.appendLine(serializeTaskStatus(it.name))
+                    }
+                    msg.reasonCode?.takeIf { it.isNotBlank() }?.let {
+                        sb.appendLine(serializeReasonCode(it))
                     }
                     sb.appendLine(msg.content)
                     sb.appendLine()
@@ -153,22 +183,25 @@ object ChatHistoryManager {
 
         file.writeText(sb.toString())
 
-        // Index in SQLite for fast search
-        try {
-            val chatDatabase = ChatDatabase(context)
+        // Index in SQLite for fast search. Batch conversations are deliberately NOT indexed so chat
+        // search never surfaces batch task rows (the two lists are separate by design).
+        if (mode == BatchUiMode.CHAT) {
             try {
-                chatDatabase.indexConversation(
-                    id = conversationId,
-                    title = title,
-                    created = messages.first().timestamp,
-                    model = model,
-                    filePath = file.absolutePath,
-                    messages = messages
-                )
-            } finally {
-                chatDatabase.close()
-            }
-        } catch (_: Exception) { /* index failure is non-fatal */ }
+                val chatDatabase = ChatDatabase(context)
+                try {
+                    chatDatabase.indexConversation(
+                        id = conversationId,
+                        title = title,
+                        created = messages.first().timestamp,
+                        model = model,
+                        filePath = file.absolutePath,
+                        messages = messages
+                    )
+                } finally {
+                    chatDatabase.close()
+                }
+            } catch (_: Exception) { /* index failure is non-fatal */ }
+        }
     }
 
     /**
@@ -188,6 +221,7 @@ object ChatHistoryManager {
         var currentGroupTitle: String? = null
         var currentRecordingId: String? = null
         var currentTaskStatus: TaskStatus? = null
+        var currentReasonCode: String? = null
         val contentBuilder = StringBuilder()
 
         for (line in lines) {
@@ -206,16 +240,17 @@ object ChatHistoryManager {
 
             when {
                 line.startsWith("## User") -> {
-                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus)
+                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus, currentReasonCode)
                     currentRole = ChatMessage.Role.USER
                     currentModelName = null
                     currentTimestamp = null
                     currentGroupTitle = null
                     currentRecordingId = null
                     currentTaskStatus = null
+                    currentReasonCode = null
                 }
                 line.startsWith("## 🦞 Assistant") -> {
-                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus)
+                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus, currentReasonCode)
                     currentRole = ChatMessage.Role.ASSISTANT
                     // Extract model name from "## 🦞 Assistant [ModelName]"
                     val bracketMatch = Regex("\\[(.+)]").find(line)
@@ -224,18 +259,20 @@ object ChatHistoryManager {
                     currentGroupTitle = null
                     currentRecordingId = null
                     currentTaskStatus = null
+                    currentReasonCode = null
                 }
                 line.startsWith("## System") -> {
-                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus)
+                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus, currentReasonCode)
                     currentRole = ChatMessage.Role.SYSTEM
                     currentModelName = null
                     currentTimestamp = null
                     currentGroupTitle = null
                     currentRecordingId = null
                     currentTaskStatus = null
+                    currentReasonCode = null
                 }
                 line.startsWith("## Tools") -> {
-                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus)
+                    flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus, currentReasonCode)
                     currentRole = ChatMessage.Role.TOOL_GROUP
                     currentModelName = null
                     currentTimestamp = null
@@ -243,6 +280,7 @@ object ChatHistoryManager {
                     currentGroupTitle = Regex("\\[(.+)]").find(line)?.groupValues?.get(1)
                     currentRecordingId = null
                     currentTaskStatus = null
+                    currentReasonCode = null
                 }
                 currentRole != null && line.startsWith(MESSAGE_TIMESTAMP_PREFIX) -> {
                     currentTimestamp = parseMessageTimestamp(line)
@@ -255,6 +293,9 @@ object ChatHistoryManager {
                 currentRole != null && line.startsWith(MESSAGE_STATUS_PREFIX) -> {
                     currentTaskStatus = parseTaskStatus(line)
                 }
+                currentRole != null && line.startsWith(MESSAGE_REASON_PREFIX) -> {
+                    currentReasonCode = parseReasonCode(line)
+                }
                 else -> {
                     if (currentRole != null && line.isNotBlank()) {
                         if (contentBuilder.isNotEmpty()) contentBuilder.appendLine()
@@ -263,7 +304,7 @@ object ChatHistoryManager {
                 }
             }
         }
-        flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus)
+        flushMessage(messages, currentRole, contentBuilder, currentModelName, currentTimestamp, fallbackConversationTimestamp, currentGroupTitle, currentRecordingId, currentTaskStatus, currentReasonCode)
 
         return messages
     }
@@ -277,7 +318,8 @@ object ChatHistoryManager {
         fallbackConversationTimestamp: Long,
         groupTitle: String? = null,
         recordingId: String? = null,
-        taskStatus: TaskStatus? = null
+        taskStatus: TaskStatus? = null,
+        reasonCode: String? = null,
     ) {
         if (role != null && content.isNotEmpty()) {
             val resolvedTimestamp = timestamp ?: (fallbackConversationTimestamp + messages.size * 1000L)
@@ -296,7 +338,8 @@ object ChatHistoryManager {
                     modelName = modelName,
                     groupTitle = groupTitle,
                     recordingId = recordingId,
-                    taskStatus = taskStatus
+                    taskStatus = taskStatus,
+                    reasonCode = reasonCode,
                 )
             )
             content.clear()
@@ -327,6 +370,17 @@ object ChatHistoryManager {
             .removeSuffix(MESSAGE_STATUS_SUFFIX)
             .trim()
         return runCatching { TaskStatus.valueOf(raw) }.getOrNull()
+    }
+
+    private fun serializeReasonCode(reasonCode: String): String {
+        return "$MESSAGE_REASON_PREFIX$reasonCode$MESSAGE_REASON_SUFFIX"
+    }
+
+    private fun parseReasonCode(line: String): String? {
+        return line.removePrefix(MESSAGE_REASON_PREFIX)
+            .removeSuffix(MESSAGE_REASON_SUFFIX)
+            .trim()
+            .takeIf { it.isNotBlank() }
     }
 
     private fun parseMessageTimestamp(line: String): Long? {
@@ -437,6 +491,7 @@ object ChatHistoryManager {
             ?.map { file ->
                 var title = file.nameWithoutExtension
                 var id = ""
+                var mode = BatchUiMode.CHAT
                 // Parse frontmatter for title
                 file.useLines { lines ->
                     var inFm = false
@@ -444,18 +499,24 @@ object ChatHistoryManager {
                         if (line == "---") { if (!inFm) { inFm = true; continue } else break }
                         if (inFm && line.startsWith("title: ")) title = line.removePrefix("title: ")
                         if (inFm && line.startsWith("id: ")) id = line.removePrefix("id: ")
+                        if (inFm && line.startsWith("mode: ")) mode = line.removePrefix("mode: ").trim()
                     }
                 }
                 ConversationSummary(
                     id = id.ifEmpty { file.nameWithoutExtension },
                     title = title,
                     created = file.lastModified(),
-                    file = file
+                    file = file,
+                    mode = mode,
                 )
             }
             ?.sortedByDescending { it.created }
             ?: emptyList()
     }
+
+    /** Conversations of a single mode (chat or batch), most-recently-accessed first. */
+    fun listConversations(context: Context, mode: String): List<ConversationSummary> =
+        listConversations(context).filter { it.mode == mode }
 
     /**
      * Rename a conversation by updating the title in the markdown frontmatter.
@@ -482,6 +543,30 @@ object ChatHistoryManager {
     }
 
     /**
+     * Read the `batch_config` frontmatter written by [save] for mode=BATCH conversations. Returns null
+     * when the file carries none (a chat conversation, or a record saved before this field) or it cannot
+     * be parsed, so callers fall back to a default [BatchConfig].
+     */
+    fun readBatchConfig(file: File): BatchConfig? {
+        if (!file.exists()) return null
+        var json: String? = null
+        runCatching {
+            file.useLines { lines ->
+                var inFm = false
+                for (line in lines) {
+                    if (line == "---") { if (!inFm) { inFm = true; continue } else break }
+                    if (inFm && line.startsWith("batch_config: ")) {
+                        json = line.removePrefix("batch_config: ").trim()
+                        break
+                    }
+                }
+            }
+        }
+        val raw = json?.takeIf { it.isNotBlank() } ?: return null
+        return runCatching { gson.fromJson(raw, BatchConfig::class.java) }.getOrNull()
+    }
+
+    /**
      * Mark a conversation as just accessed so it sorts to the top of the recent list.
      */
     fun touchAccess(file: File) {
@@ -489,11 +574,12 @@ object ChatHistoryManager {
     }
 
     /**
-     * Keep at most [MAX_CONVERSATIONS] conversations on disk. When over the limit, prune the
-     * least-recently-accessed ones (bottom of the recent list) first, never the [protectId] one.
+     * Keep at most [MAX_CONVERSATIONS] conversations PER MODE on disk. Chat and batch are counted
+     * and pruned independently, so running batches never pushes the user's chat history off the
+     * list (and vice versa). Within a mode, prune the least-recently-accessed first, never [protectId].
      */
-    fun enforceRetention(context: Context, protectId: String) {
-        val conversations = listConversations(context) // most-recently-accessed first
+    fun enforceRetention(context: Context, protectId: String, mode: String = BatchUiMode.CHAT) {
+        val conversations = listConversations(context).filter { it.mode == mode }
         val excess = conversations.size - MAX_CONVERSATIONS
         if (excess <= 0) return
         val victims = conversations.asReversed().filter { it.id != protectId }.take(excess)

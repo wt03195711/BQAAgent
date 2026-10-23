@@ -24,6 +24,7 @@ import io.agents.bqaagent.tool.impl.GetScreenInfoTool
 import io.agents.bqaagent.tool.ToolResult
 import io.agents.bqaagent.agent.skill.SkillRecorder
 import io.agents.bqaagent.utils.XLog
+import io.agents.bqaagent.utils.KVUtils
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import dev.langchain4j.data.message.AiMessage
@@ -31,7 +32,9 @@ import dev.langchain4j.data.message.ChatMessage
 import dev.langchain4j.data.message.SystemMessage
 import dev.langchain4j.data.message.ToolExecutionResultMessage
 import dev.langchain4j.data.message.UserMessage
-import dev.langchain4j.agent.tool.ToolExecutionRequest
+import dev.langchain4j.model.chat.request.json.JsonObjectSchema
+import dev.langchain4j.model.chat.request.json.JsonSchemaElement
+import dev.langchain4j.model.chat.request.json.JsonStringSchema
 import dev.langchain4j.agent.tool.ToolSpecification
 import io.agents.bqaagent.utils.ScreenSettleWaiter
 import java.io.File
@@ -69,7 +72,7 @@ class DefaultAgentService : AgentService {
 
 ## Rules
 - One tool call per turn.
-- Before every tool call, include ONE short sentence (at most 15 words) in the reply text describing the action and its purpose, e.g. "Open Settings to enable dark mode". Write it as neutral third-person narration: no "I"/"let's", no fillers like "Okay"/"Now". This sentence is separate from tool parameters and never replaces any tool argument.
+- Before every Tool call, include ONE short sentence (at most 15 words) in the reply text describing the action and its purpose, e.g. "Open Settings to enable dark mode". Write it as neutral third-person narration: no "I"/"let's", no fillers like "Okay"/"Now". ALWAYS write this sentence in the SAME language as the user's input (Chinese input → Chinese narration; English input → English narration). This sentence is separate from tool parameters and never replaces any tool argument.
 - If the same approach fails 3 times, call finish(status="failed", summary="what went wrong and what the user can try").
 - Summaries must include the actual data found, not just "I checked".
 - For passwords and financial final actions, follow any later task-specific policy. If no task-specific policy allows the action, stop before entering sensitive credentials or finalizing financial actions. Never delete data."""
@@ -87,21 +90,21 @@ class DefaultAgentService : AgentService {
         private val ACTION_TOOLS = setOf(
             "phone_click_node", "phone_tap", "phone_swipe", "phone_long_press",
             "tap", "tap_node", "tap_visible_text", "long_press", "swipe", "scroll_to_find", "find_and_tap",
-            "input_text", "input_amount", "bank_own_account_transfer", "type_text", "system_key", "open_app", "open_url",
+            "input_text", "input_amount", "type_text", "system_key", "open_app", "open_url",
             "dpad_up", "dpad_down", "dpad_left", "dpad_right", "dpad_center",
             "volume_up", "volume_down", "press_menu", "press_power",
             "clipboard", "send_file", "send_message", "make_call", "repeat_actions", "secure_keypad_input", "wait"
         )
-        private val SKIP_AUTO_SCREEN_AFTER_ACTION = setOf("scroll_to_find", "bank_own_account_transfer")
+        private val SKIP_AUTO_SCREEN_AFTER_ACTION = setOf("scroll_to_find")
         /** ms to wait for UI to settle before capturing screen after an action */
         private const val SCREEN_SETTLE_MS = 2000L
         /** Extract quoted labels from screen tree output; both compact and text modes wrap labels in double quotes */
         private val ANCHOR_QUOTED_LABEL_REGEX = Regex("\"([^\"]{2,60})\"")
         private const val UNUSABLE_SCREEN_PREFIX = "SCREEN_TREE_UNUSABLE"
-        private const val SENSITIVE_HARD_TOKEN_LIMIT = 400_000
         private const val DUMP_ONLY_HARD_TOKEN_LIMIT = 180_000
         private const val BROWSER_HARD_TOKEN_LIMIT = 220_000
-        private val DUMP_ONLY_FORBIDDEN_TOOLS = SensitiveAppPolicy.forbiddenTools
+        private val DUMP_ONLY_FORBIDDEN_TOOLS = setOf("take_screenshot", "send_file")
+
         private val CORE_AGENT_TOOLS = linkedSetOf(
             "get_screen_info",
             "find_node_info",
@@ -122,25 +125,72 @@ class DefaultAgentService : AgentService {
             "finish",
             "analyze_screen_visual",
         )
-        private val SENSITIVE_AGENT_TOOLS = linkedSetOf(
-            "get_screen_info",
-            "find_node_info",
-            "open_app",
-            "open_url",
-            "wait",
-            "finish",
-            "tap",
-            "tap_node",
-            "tap_visible_text",
-            "swipe",
-            "scroll_to_find",
-            "find_and_tap",
-            "system_key",
-            "secure_keypad_input",
-            "input_amount",
-            "bank_own_account_transfer",
-            "analyze_screen_visual",
-        )
+
+        /** Virtual gate tool (not in ToolRegistry): model asks user confirmation for a risky action */
+        const val SENSITIVE_CONFIRM_TOOL = "request_sensitive_confirm"
+        /** Single source of truth for the confirmation dialog timeout */
+        const val SENSITIVE_CONFIRM_TIMEOUT_MS = 30_000L
+        /** System hard fallback: tools that are inherently high-risk, gated even without a model call */
+        private val SENSITIVE_HARD_GATE_TOOLS = setOf("secure_keypad_input", "input_amount")
+
+        private fun buildSensitiveConfirmToolSpec(): ToolSpecification {
+            val properties: Map<String, JsonSchemaElement> = linkedMapOf(
+                "action_summary" to JsonStringSchema.builder()
+                    .description("One-sentence summary of the risky action about to be performed, in the user's language, including target and amount if known")
+                    .build(),
+                "risk_type" to JsonStringSchema.builder()
+                    .description("Risk category: \"payment\" (money transfer/payment/order), \"password\" (PIN/password/credential entry) or \"other\"")
+                    .build()
+            )
+            return ToolSpecification.builder()
+                .name(SENSITIVE_CONFIRM_TOOL)
+                .description(
+                    "Request user confirmation before executing a high-risk action (payment, password entry, " +
+                            "transfer, etc.). MUST be called instead of directly executing the risky action when the " +
+                            "action involves money movement or credential entry. Returns APPROVED or REJECTED."
+                )
+                .parameters(
+                    JsonObjectSchema.builder()
+                        .addProperties(properties)
+                        .required(listOf("action_summary", "risk_type"))
+                        .build()
+                )
+                .build()
+        }
+
+        private fun buildSensitiveConfirmPromptSection(): String = """
+
+# Sensitive Action Confirmation (MANDATORY)
+Sensitive-confirm mode is ON. Before any high-risk action you MUST first call the tool
+`request_sensitive_confirm` with a clear `action_summary` (what exactly will happen, including
+amount and recipient if known) and `risk_type` ("payment" | "password" | "other").
+High-risk actions include, but are not limited to:
+- Transfers, payments, orders, or any action that moves money
+- Entering passwords, PINs, verification codes, or using the secure keypad for credentials
+- Irreversible operations (deletion, changes to recipients/accounts)
+Ordinary navigation, reading, searching, or scrolling does NOT need confirmation.
+Workflow: call request_sensitive_confirm -> if it returns APPROVED, you may then execute THAT
+one confirmed action; if it returns REJECTED, stop and call finish(status="failed", ...)
+explaining that the user rejected the sensitive action. Never skip request_sensitive_confirm
+for a high-risk action, and never re-attempt a rejected action.
+"""
+
+        private fun sensitiveHardGateSummary(toolName: String, params: Map<String, Any>): String {
+            return when (toolName) {
+                "secure_keypad_input" -> {
+                    val digits = params["digits"]?.toString().orEmpty()
+                    "Enter ${digits.length} secure keypad digit(s) (PIN/password)"
+                }
+                "input_amount" -> {
+                    val amount = params["amount"]?.toString().orEmpty()
+                    "Enter monetary amount $amount"
+                }
+                else -> "Execute sensitive action: $toolName"
+            }
+        }
+
+        private fun sensitiveHardGateRiskType(toolName: String): String =
+            if (toolName == "secure_keypad_input") "password" else "payment"
 
         /** Whether to write raw network request/response data to sandbox cache files for debugging */
         @JvmField
@@ -217,7 +267,6 @@ class DefaultAgentService : AgentService {
             request: String,
             dumpOnlyTask: Boolean,
             browserTask: Boolean,
-            sensitiveTask: Boolean,
         ): Set<String> {
             val lower = request.lowercase()
             val names = linkedSetOf<String>()
@@ -225,10 +274,6 @@ class DefaultAgentService : AgentService {
             val browserNavigationTask = isBrowserNavigationTask(request)
             if (browserNavigationTask) {
                 names.addAll(listOf("get_screen_info", "open_url", "wait", "finish"))
-                return names
-            }
-            if (sensitiveTask) {
-                names.addAll(SENSITIVE_AGENT_TOOLS)
                 return names
             }
 
@@ -266,7 +311,7 @@ class DefaultAgentService : AgentService {
             if (hasAny(lower, "knowledge base", "kb_", "todo", "待办")) {
                 names.addAll(listOf("kb_write", "kb_read", "kb_search", "kb_append", "kb_add_todo"))
             }
-            if (dumpOnlyTask || sensitiveTask) {
+            if (dumpOnlyTask) {
                 names.removeAll(DUMP_ONLY_FORBIDDEN_TOOLS)
             }
             return names
@@ -308,53 +353,6 @@ class DefaultAgentService : AgentService {
             return data?.startsWith(UNUSABLE_SCREEN_PREFIX) == true
         }
 
-        private fun sensitiveAmountTerminalMessage(toolName: String, result: ToolResult, request: String): String? {
-            // Sensitive-mode isolation: this is a banking-domain rule and must not fire when
-            // sensitive mode is off. Otherwise a generic app's input_amount returning "BLOCKED:"
-            // (e.g. a disabled Continue/Next button) would wrongly terminate the task. Mirrors the
-            // self-guard in the sibling terminal functions (missingPinTerminalMessage etc.).
-            if (!SensitiveAppPolicy.isSensitiveTask(request)) return null
-            if (toolName == "bank_own_account_transfer") {
-                result.data?.takeIf { it.contains("COMPLETED:") }?.let { data ->
-                    return "Task completed by bank transfer flow. $data"
-                }
-                result.data?.takeIf { it.contains("BLOCKED:") }?.let { data ->
-                    return "Task stopped during bank transfer flow before unsafe final action. $data"
-                }
-                result.error?.takeIf { it.isNotBlank() }?.let { error ->
-                    return "Task stopped during bank transfer flow before unsafe final action. $error"
-                }
-            }
-            if (toolName != "input_amount") return null
-            result.data?.takeIf { it.contains("BLOCKED:") }?.let { data ->
-                if (SensitiveAppPolicy.allowsReceiveAmountInput(request) && !isReceiveSideAmountResult(data)) {
-                    return null
-                }
-                return "Task stopped on the amount page before any final transaction action. $data"
-            }
-            result.error?.takeIf {
-                it.contains("receive/credit amount", ignoreCase = true)
-            }?.let { error ->
-                return "Task stopped on the amount page before any final transaction action. $error"
-            }
-            return null
-        }
-
-        private fun isReceiveAmountField(field: String?): Boolean {
-            val normalized = field
-                ?.lowercase()
-                ?.replace(" ", "")
-                ?.replace("-", "")
-                ?.trim()
-                .orEmpty()
-            return normalized in setOf("credit", "to", "receive", "destination")
-        }
-
-        private fun isReceiveSideAmountResult(data: String): Boolean {
-            val targetSummary = data.substringBefore(". Amount state", data).lowercase()
-            return listOf("credit", "receive", "入账金额", "入賬金額", "入帳金額")
-                .any { targetSummary.contains(it) }
-        }
     }
 
     private lateinit var config: AgentConfig
@@ -432,6 +430,10 @@ class DefaultAgentService : AgentService {
             override fun onScreenshotBlocked(round: Int, intent: String, timeoutMs: Long): String? {
                 return callback.onScreenshotBlocked(round, intent, timeoutMs)
             }
+
+            override fun onSensitiveConfirm(round: Int, actionSummary: String, riskType: String, timeoutMs: Long): Boolean {
+                return callback.onSensitiveConfirm(round, actionSummary, riskType, timeoutMs)
+            }
         }
 
         taskFuture = executor?.submit {
@@ -490,14 +492,17 @@ class DefaultAgentService : AgentService {
         request: String,
         dumpOnlyTask: Boolean,
         browserTask: Boolean,
-        sensitiveTask: Boolean,
+        sensitiveConfirmEnabled: Boolean,
     ): List<ToolSpecification> {
-        val activeNames = activeToolNamesFor(request, dumpOnlyTask, browserTask, sensitiveTask)
-        val filtered = toolSpecs.filter { it.name() in activeNames }
+        val activeNames = activeToolNamesFor(request, dumpOnlyTask, browserTask)
+        var filtered = toolSpecs.filter { it.name() in activeNames }
+        if (sensitiveConfirmEnabled) {
+            filtered = filtered + buildSensitiveConfirmToolSpec()
+        }
         XLog.i(
             TAG,
             "runAgentLoop: active tool schema ${filtered.size}/${toolSpecs.size}: " +
-                filtered.joinToString(", ") { it.name() }
+                    filtered.joinToString(", ") { it.name() }
         )
         return filtered
     }
@@ -601,7 +606,6 @@ class DefaultAgentService : AgentService {
 
     /** Protected zone: keep the most recent N rounds intact */
     private val KEEP_RECENT_ROUNDS = 3
-    private val SENSITIVE_KEEP_RECENT_ROUNDS = 1
 
     /** Large-output observation tools → compressed placeholder */
     private val OBSERVATION_PLACEHOLDERS = mapOf(
@@ -749,10 +753,9 @@ class DefaultAgentService : AgentService {
 
         val parsedPrompt = TaskPromptEnvelope.parse(userPrompt)
         val rawUserRequest = parsedPrompt.currentRequest
-        val sensitiveTask = SensitiveAppPolicy.isSensitiveTask(rawUserRequest)
-        val dumpOnlyTask = isDumpOnlyRequest(rawUserRequest) || sensitiveTask
+        val sensitiveConfirmEnabled = KVUtils.isSensitiveConfirmEnabled()
+        val dumpOnlyTask = isDumpOnlyRequest(rawUserRequest)
         val browserTask = isBrowserTask(rawUserRequest)
-        val browserNavigationTask = isBrowserNavigationTask(rawUserRequest)
         LocalAdbDeviceDriver.invalidateScreenCache()
 
         // Task-level screen mode, decided ONCE by provider and kept stable for the whole
@@ -767,7 +770,7 @@ class DefaultAgentService : AgentService {
         } else {
             config.systemPrompt
         }
-        val activeToolSpecs = buildActiveToolSpecs(rawUserRequest, dumpOnlyTask, browserTask, sensitiveTask)
+        val activeToolSpecs = buildActiveToolSpecs(rawUserRequest, dumpOnlyTask, browserTask, sensitiveConfirmEnabled)
         val activeToolNameSet = activeToolSpecs.map { it.name() }.toSet()
 
         val inAppSearchGuard = InAppSearchGuard.fromTask(rawUserRequest)
@@ -775,7 +778,7 @@ class DefaultAgentService : AgentService {
         val directDeviceDataGuard = DirectDeviceDataGuard.fromTask(rawUserRequest)
 
         // For local LLM, inject matching playbook into system prompt
-        val playbookSection = if (config.provider == LlmProvider.LOCAL || sensitiveTask) {
+        val playbookSection = if (config.provider == LlmProvider.LOCAL) {
             val matched = PlaybookManager.match(rawUserRequest)
             if (matched != null) {
                 XLog.i(TAG, "Playbook matched: ${matched.id} for '$rawUserRequest'")
@@ -787,7 +790,7 @@ class DefaultAgentService : AgentService {
             append(basePrompt)
             append(playbookSection)
             if (dumpOnlyTask) append(buildDumpOnlyPromptSection())
-            if (sensitiveTask) append(SensitiveAppPolicy.buildPromptSection(rawUserRequest))
+            if (sensitiveConfirmEnabled) append(buildSensitiveConfirmPromptSection())
             if (browserTask) append(buildBrowserPromptSection())
             append(inAppSearchGuard.buildPromptSection())
             append(emailComposeGuard.buildPromptSection())
@@ -798,10 +801,7 @@ class DefaultAgentService : AgentService {
         val messages = mutableListOf<ChatMessage>()
         messages.add(SystemMessage.from(fullSystemPrompt))
 
-        val promptForModel = if (sensitiveTask) {
-            XLog.i(TAG, "runAgentLoop: sensitive task uses current request only; chat history/background omitted")
-            rawUserRequest
-        } else if (parsedPrompt.hasChatHistory || parsedPrompt.hasBackgroundState) {
+        val promptForModel = if (parsedPrompt.hasChatHistory || parsedPrompt.hasBackgroundState) {
             buildString {
                 append("You are continuing an existing chatroom. Use the provided context when the current request refers to earlier messages or asks about current background activity.\n\n")
                 parsedPrompt.backgroundState?.trim()?.takeIf { it.isNotEmpty() }?.let { state ->
@@ -835,9 +835,9 @@ class DefaultAgentService : AgentService {
             lowerPrompt.contains("check ") || lowerPrompt.contains("compose ") ||
             lowerPrompt.contains("find ") || lowerPrompt.contains("screen") ||
             lowerPrompt.contains("notification") || lowerPrompt.contains("read my") ||
-            lowerPrompt.contains("call ") || lowerPrompt.contains("dial ") ||
-            sensitiveTask
+                lowerPrompt.contains("call ") || lowerPrompt.contains("dial ")
 
+        val browserNavigationTask = isBrowserNavigationTask(rawUserRequest)
         var prewarmedScreenData: String? = null
         var screenChangedSincePrewarm = false
         val enrichedPrompt = if (looksLikeTask && !browserNavigationTask) {
@@ -846,21 +846,10 @@ class DefaultAgentService : AgentService {
                 if (screenTool != null) {
                     val screenResult = screenTool.execute(mapOf("mode" to taskScreenMode))
                     if (screenResult.isSuccess && !screenResult.data.isNullOrBlank()) {
-                        val candidateScreenData = screenResult.data
-                        if (sensitiveTask && !SensitiveAppPolicy.isSensitiveAppScreen(candidateScreenData)) {
-                            XLog.i(TAG, "runAgentLoop: skipping non-sensitive-app pre-warm screen for sensitive task (${candidateScreenData!!.length} chars)")
-                            promptForModel
-                        } else {
-                            prewarmedScreenData = candidateScreenData
-                            XLog.i(TAG, "runAgentLoop: pre-warm screen attached (${prewarmedScreenData!!.length} chars)")
-                            SensitiveAppPolicy.missingCredentialTerminalMessage(prewarmedScreenData, rawUserRequest)?.let { terminal ->
-                                XLog.i(TAG, "Sensitive missing-credential terminal from pre-warm screen")
-                                callback.onComplete(0, terminal, 0, null, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
-                                return
-                            }
-                            "$promptForModel\n\nCurrent screen:\n$prewarmedScreenData\n\n" +
+                        prewarmedScreenData = screenResult.data
+                        XLog.i(TAG, "runAgentLoop: pre-warm screen attached (${prewarmedScreenData!!.length} chars)")
+                        "$promptForModel\n\nCurrent screen:\n$prewarmedScreenData\n\n" +
                                 "Use this current screen snapshot for the first step. Do not call get_screen_info again before your first action unless the screen may have changed."
-                        }
                     } else promptForModel
                 } else promptForModel
             } catch (e: Exception) { promptForModel }
@@ -892,9 +881,10 @@ class DefaultAgentService : AgentService {
         var softLimitWarned = false
         var consecutiveNoToolCalls = 0
         var consecutiveUnusableScreens = 0
-        var securePinAttempts = 0
-        var sensitiveDeepLinkAttempts = 0
-        var sensitiveBankBatchAttempted = false
+        /** Summary stamped onto the next recorded step after a user-approved sensitive action */
+        var pendingSensitiveMark: String? = null
+        /** One-shot ticket: the immediately-next dispatched tool was user-confirmed via the gate */
+        var sensitiveHardGateTicket = false
         var iterationsSinceLastVlm = 0
         var vlmAttempted = false
         var vlmHinted = false
@@ -904,55 +894,12 @@ class DefaultAgentService : AgentService {
         val traceTurnId = LlmTraceContext.newTurnId("agent", rawUserRequest)
         val tracePromptHash = LlmTraceContext.promptHash(rawUserRequest)
 
-        fun runSensitiveBankBatch(batchParams: Map<String, Any>, reason: String): Boolean {
-            if (!sensitiveTask || sensitiveBankBatchAttempted) return false
-            sensitiveBankBatchAttempted = true
-            val toolName = "bank_own_account_transfer"
-            val displayName = ToolRegistry.getInstance().getDisplayName(toolName)
-            val paramsString = GSON.toJson(batchParams)
-            XLog.i(TAG, "Sensitive bank batch auto-run from $reason: $paramsString")
-            callback.onToolCall(iterations, toolName, displayName, paramsString)
-            val result = try {
-                ToolRegistry.getInstance().executeTool(toolName, batchParams)
-            } catch (e: Exception) {
-                ToolResult.error("Bank transfer batch flow failed: ${e.message}")
-            }
-            callback.onToolResult(iterations, toolName, displayName, paramsString, result)
-            val terminal = sensitiveAmountTerminalMessage(toolName, result, rawUserRequest)
-                ?: result.error?.let { "Task stopped during bank transfer flow before unsafe final action. $it" }
-                ?: result.data?.let { "Task stopped during bank transfer flow before unsafe final action. $it" }
-                ?: "Task stopped during bank transfer flow before unsafe final action."
-            val bankDone = terminal.startsWith("Task completed")
-            callback.onComplete(
-                iterations, terminal, totalTokens, actualModelName,
-                if (bankDone) TaskStatus.SUCCESS else TaskStatus.STOPPED,
-                if (bankDone) TaskReasonCode.TASK_SUCCESS else TaskReasonCode.SENSITIVE_POLICY
-            )
-            return true
-        }
-
-        fun runSensitiveBankBatchIfReady(screenData: String?, reason: String): Boolean {
-            val batchParams = SensitiveAppPolicy.bankTransferBatchParamsIfReady(screenData, rawUserRequest)
-                ?: return false
-            return runSensitiveBankBatch(batchParams, reason)
-        }
-
-        if (runSensitiveBankBatchIfReady(prewarmedScreenData, "prewarm")) {
-            return
-        }
-
         while (iterations < maxIterations && !cancelled.get()) {
             iterations++
             callback.onLoopStart(iterations)
             iterationsSinceLastVlm++
 
-            // Compress history messages before sending to save tokens. Sensitive
-            // app tasks can have very large ADB dumps, so keep only the latest
-            // full observation in context and summarize older rounds.
-            compressHistoryForSend(
-                messages,
-                keepRecentRounds = if (sensitiveTask) SENSITIVE_KEEP_RECENT_ROUNDS else KEEP_RECENT_ROUNDS
-            )
+            compressHistoryForSend(messages)
 
             // Periodic VLM hint (difficulty-gated, Fix C): only when VLM is configured,
             // an unusable screen was ACTUALLY observed, and we have not already hinted or
@@ -1073,7 +1020,6 @@ class DefaultAgentService : AgentService {
             }
 
             val localHardTokenLimit = when {
-                sensitiveTask -> SENSITIVE_HARD_TOKEN_LIMIT
                 dumpOnlyTask -> DUMP_ONLY_HARD_TOKEN_LIMIT
                 browserTask -> BROWSER_HARD_TOKEN_LIMIT
                 else -> Int.MAX_VALUE
@@ -1081,7 +1027,6 @@ class DefaultAgentService : AgentService {
             if (tokenStatus.totalTokens >= localHardTokenLimit) {
                 XLog.w(TAG, "Task safety token limit reached at step $iterations: ${tokenStatus.formattedTokens}")
                 val taskType = when {
-                    sensitiveTask -> "sensitive dump-only"
                     dumpOnlyTask -> "dump-only"
                     else -> "browser"
                 }
@@ -1232,44 +1177,61 @@ class DefaultAgentService : AgentService {
                     }
                 }
 
-                if (sensitiveTask && toolName == "secure_keypad_input") {
-                    params = params.toMutableMap().apply { put("submit_after_entry", false) }
-                    XLog.i(TAG, "Sensitive secure_keypad_input: submit_after_entry forced false")
-                }
-
-                if (sensitiveTask &&
-                    toolName == "input_amount" &&
-                    SensitiveAppPolicy.allowsReceiveAmountInput(rawUserRequest) &&
-                    isReceiveAmountField(params["field"]?.toString())
-                ) {
-                    params = params.toMutableMap().apply { put("allow_receive_amount", true) }
-                    XLog.i(TAG, "Sensitive input_amount: receive-side amount allowed by explicit request")
-                }
-
-                val sensitivePolicyError = if (sensitiveTask) {
-                    SensitiveAppPolicy.blockedToolMessage(toolName, rawUserRequest)
-                        ?: SensitiveAppPolicy.blockedOpenUrlMessage(toolName, params, rawUserRequest)
-                        ?: SensitiveAppPolicy.blockedInputMessage(toolName, params, rawUserRequest)
-                        ?: SensitiveAppPolicy.blockedCredentialSwitchMessage(toolName, params, rawUserRequest)
-                        ?: SensitiveAppPolicy.blockedScrollMessage(toolName, params, rawUserRequest)
-                        ?: SensitiveAppPolicy.blockedTapMessage(toolName, params, rawUserRequest)
-                } else {
-                    null
-                }
-                if (sensitivePolicyError != null) {
-                    if (sensitivePolicyError.startsWith("Use bank_own_account_transfer")) {
-                        val batchParams = SensitiveAppPolicy.bankTransferBatchParamsFromRequest(rawUserRequest)
-                        if (batchParams != null && runSensitiveBankBatch(batchParams, "policy_block_$toolName")) {
-                            return
-                        }
+                // === Sensitive confirm gate (AI-judged virtual tool) ===
+                if (toolName == SENSITIVE_CONFIRM_TOOL) {
+                    val actionSummary = params["action_summary"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: "High-risk action"
+                    val riskType = params["risk_type"]?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: "other"
+                    XLog.i(TAG, "Sensitive confirm gate raised by model: $actionSummary ($riskType)")
+                    callback.onToolCall(iterations, toolName, actionSummary, toolArgs)
+                    val approved = callback.onSensitiveConfirm(iterations, actionSummary, riskType, SENSITIVE_CONFIRM_TIMEOUT_MS)
+                    if (cancelled.get()) {
+                        callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
+                        return
                     }
-                    val blockedResult = ToolResult.error(sensitivePolicyError)
-                    XLog.w(TAG, "Sensitive app policy blocked $toolName: $sensitivePolicyError")
-                    callback.onToolCall(iterations, toolName, displayName, toolArgs)
-                    callback.onToolResult(iterations, toolName, displayName, params.toString(), blockedResult)
-                    messages.add(ToolExecutionResultMessage.from(toolRequest, GSON.toJson(blockedResult)))
-                    messages.add(UserMessage.from("[System Notice] $sensitivePolicyError"))
+                    val gateResult = if (approved) {
+                        ToolResult.success("APPROVED: the user confirmed this sensitive action. You may now execute exactly that action.")
+                    } else {
+                        ToolResult.error("REJECTED: the user denied this sensitive action or confirmation timed out. Call finish(status=\"failed\", ...) explaining the rejection.")
+                    }
+                    callback.onToolResult(iterations, toolName, actionSummary, "", gateResult)
+                    messages.add(ToolExecutionResultMessage.from(toolRequest, GSON.toJson(gateResult)))
+                    if (approved) {
+                        sensitiveHardGateTicket = true
+                        pendingSensitiveMark = actionSummary
+                    } else {
+                        callback.onComplete(
+                            iterations,
+                            "Task failed: the user rejected the sensitive action or confirmation timed out. ($actionSummary)",
+                            totalTokens, actualModelName, TaskStatus.FAILED, TaskReasonCode.SENSITIVE_CONFIRM
+                        )
+                        return
+                    }
                     continue
+                }
+
+                // === Sensitive hard gate (system fallback for inherently risky tools) ===
+                if (sensitiveConfirmEnabled && toolName in SENSITIVE_HARD_GATE_TOOLS && !sensitiveHardGateTicket) {
+                    val hardSummary = sensitiveHardGateSummary(toolName, params)
+                    val hardRiskType = sensitiveHardGateRiskType(toolName)
+                    XLog.i(TAG, "Hard sensitive gate for $toolName: $hardSummary")
+                    val hardApproved = callback.onSensitiveConfirm(iterations, hardSummary, hardRiskType, SENSITIVE_CONFIRM_TIMEOUT_MS)
+                    if (cancelled.get()) {
+                        callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
+                        return
+                    }
+                    if (!hardApproved) {
+                        val deniedResult = ToolResult.error("REJECTED_BY_USER: sensitive action not confirmed")
+                        callback.onToolCall(iterations, toolName, displayName, toolArgs)
+                        callback.onToolResult(iterations, toolName, displayName, params.toString(), deniedResult)
+                        callback.onComplete(
+                            iterations,
+                            "Task failed: the user rejected the sensitive action or confirmation timed out. ($hardSummary)",
+                            totalTokens, actualModelName, TaskStatus.FAILED, TaskReasonCode.SENSITIVE_CONFIRM
+                        )
+                        return
+                    }
+                    pendingSensitiveMark = pendingSensitiveMark ?: hardSummary
                 }
 
                 if (dumpOnlyTask && toolName in DUMP_ONLY_FORBIDDEN_TOOLS) {
@@ -1402,52 +1364,9 @@ class DefaultAgentService : AgentService {
                         }
                     }
                 }
-                if (sensitiveTask && toolName == "secure_keypad_input") {
-                    securePinAttempts++
-                    XLog.i(TAG, "Sensitive secure PIN attempt $securePinAttempts result=${result.isSuccess}")
-                }
-                if (sensitiveTask && toolName == "open_url" && result.isSuccess &&
-                    SensitiveAppPolicy.isAllowedSensitiveDeepLink(params["url"]?.toString().orEmpty(), rawUserRequest)
-                ) {
-                    sensitiveDeepLinkAttempts++
-                    XLog.i(TAG, "Sensitive deep-link recovery attempt $sensitiveDeepLinkAttempts")
-                }
-
-                sensitiveAmountTerminalMessage(toolName, result, rawUserRequest)?.let { terminal ->
-                    XLog.i(TAG, "Sensitive amount terminal after $toolName: ${terminal.take(180)}")
-                    val amountDone = terminal.startsWith("Task completed")
-                    callback.onComplete(
-                        iterations, terminal, totalTokens, actualModelName,
-                        if (amountDone) TaskStatus.SUCCESS else TaskStatus.STOPPED,
-                        if (amountDone) TaskReasonCode.TASK_SUCCESS else TaskReasonCode.SENSITIVE_POLICY
-                    )
-                    return
-                }
 
                 var postToolNotice: String? = null
                 if (toolName == "get_screen_info" && result.isSuccess && result.data != null) {
-                    SensitiveAppPolicy.missingCredentialTerminalMessage(result.data, rawUserRequest)?.let { terminal ->
-                        XLog.i(TAG, "Sensitive missing-credential terminal from get_screen_info")
-                        callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
-                        return
-                    }
-                    SensitiveAppPolicy.loginTimeoutTerminalMessage(result.data, rawUserRequest, securePinAttempts, sensitiveDeepLinkAttempts)?.let { terminal ->
-                        XLog.i(TAG, "Sensitive login-timeout terminal from get_screen_info")
-                        callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
-                        return
-                    }
-                    SensitiveAppPolicy.loginTimeoutRecoveryNotice(result.data, rawUserRequest, securePinAttempts, sensitiveDeepLinkAttempts)?.let { notice ->
-                        XLog.i(TAG, "Sensitive login-timeout recovery notice from get_screen_info")
-                        postToolNotice = notice
-                    }
-                    SensitiveAppPolicy.repeatedPinTerminalMessage(result.data, rawUserRequest, securePinAttempts)?.let { terminal ->
-                        XLog.i(TAG, "Sensitive repeated-PIN terminal from get_screen_info")
-                        callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
-                        return
-                    }
-                    if (runSensitiveBankBatchIfReady(result.data, "get_screen_info")) {
-                        return
-                    }
                     if (isUnusableScreen(result.data)) {
                         consecutiveUnusableScreens++
                         XLog.w(TAG, "get_screen_info returned unusable tree ($consecutiveUnusableScreens consecutive)")
@@ -1539,28 +1458,6 @@ class DefaultAgentService : AgentService {
                         val screenTool = ToolRegistry.getInstance().getTool("get_screen_info")
                         val screenAfter = screenTool?.execute(mapOf("mode" to taskScreenMode))
                         if (screenAfter != null && screenAfter.isSuccess && !screenAfter.data.isNullOrBlank()) {
-                            SensitiveAppPolicy.missingCredentialTerminalMessage(screenAfter.data, rawUserRequest)?.let { terminal ->
-                                XLog.i(TAG, "Sensitive missing-credential terminal after $toolName")
-                                callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
-                                return
-                            }
-                            SensitiveAppPolicy.loginTimeoutTerminalMessage(screenAfter.data, rawUserRequest, securePinAttempts, sensitiveDeepLinkAttempts)?.let { terminal ->
-                                XLog.i(TAG, "Sensitive login-timeout terminal after $toolName")
-                                callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
-                                return
-                            }
-                            SensitiveAppPolicy.loginTimeoutRecoveryNotice(screenAfter.data, rawUserRequest, securePinAttempts, sensitiveDeepLinkAttempts)?.let { notice ->
-                                XLog.i(TAG, "Sensitive login-timeout recovery notice after $toolName")
-                                postToolNotice = notice
-                            }
-                            SensitiveAppPolicy.repeatedPinTerminalMessage(screenAfter.data, rawUserRequest, securePinAttempts)?.let { terminal ->
-                                XLog.i(TAG, "Sensitive repeated-PIN terminal after $toolName")
-                                callback.onComplete(iterations, terminal, totalTokens, actualModelName, TaskStatus.STOPPED, TaskReasonCode.SENSITIVE_POLICY)
-                                return
-                            }
-                            if (runSensitiveBankBatchIfReady(screenAfter.data, "screen_after_$toolName")) {
-                                return
-                            }
                             if (isUnusableScreen(screenAfter.data)) {
                                 consecutiveUnusableScreens++
                                 XLog.w(TAG, "Screen after $toolName is unusable ($consecutiveUnusableScreens consecutive)")
@@ -1688,14 +1585,22 @@ class DefaultAgentService : AgentService {
                             anchorTexts = anchorTexts,
                             nodeLocator = nodeLocatorSnapshot,
                             intent = stepIntent,
-                            precomputedTargetText = preTargetText
+                            precomputedTargetText = preTargetText,
+                            sensitive = pendingSensitiveMark != null && SkillRecorder.isRecordableTool(toolName),
+                            confirmSummary = pendingSensitiveMark.orEmpty()
                         )
                     }
                 } catch (e: Exception) {
                     XLog.w(TAG, "Skill recording step failed", e)
                 }
 
-                // Add tool result to messages
+                // Sensitive ticket/mark validity is scoped to exactly one tool dispatch:
+                // cleared at the end of every dispatched tool so a ticket can never be
+                // reused for a later risky action.
+                sensitiveHardGateTicket = false
+                pendingSensitiveMark = null
+
+                // Add tool result to message
                 messages.add(ToolExecutionResultMessage.from(toolRequest, combinedResultData))
                 if (postToolNotice != null) {
                     messages.add(UserMessage.from(postToolNotice))
