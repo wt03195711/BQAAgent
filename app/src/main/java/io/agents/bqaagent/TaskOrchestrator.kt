@@ -23,6 +23,7 @@ import io.agents.bqaagent.ui.batch.BatchRunContext
 import io.agents.bqaagent.channel.Channel
 import io.agents.bqaagent.channel.ChannelManager
 import io.agents.bqaagent.floating.FloatingCircleManager
+import io.agents.bqaagent.adb.LocalAdbAutomation
 import io.agents.bqaagent.adb.LocalAdbDeviceDriver
 import io.agents.bqaagent.recording.RecordingOutcome
 import io.agents.bqaagent.recording.TaskRecordingCoordinator
@@ -60,9 +61,44 @@ class TaskOrchestrator(
     @Volatile
     private var pendingSensitiveConfirmApproved = false
 
+    /**
+     * Skill-analysis handoff. The 300s analysis wait used to be invisible to cancellation, so a
+     * cancel landing there left the pipeline thread alive and able to start a brand-new run after
+     * the session was gone. Registering the latch lets the stop intent release it.
+     */
+    private var pendingAnalysisLatch: java.util.concurrent.CountDownLatch? = null
+
+    /**
+     * Every worker thread this orchestrator spawned (pipeline, skill exec, replay, direct tool).
+     * Registered on launch and removed in the thread's own finally, so `isBusy` reflects what is
+     * really still alive rather than what the session lock happens to remember.
+     */
+    private val activeWorkers = java.util.concurrent.ConcurrentHashMap.newKeySet<Thread>()
+
+    /**
+     * Authoritative "someone is still working" flag for both UI gates and the cross-mode check.
+     * Busy == session held OR the agent engine is running OR any worker thread is alive.
+     */
+    private val _busy = kotlinx.coroutines.flow.MutableStateFlow(false)
+    val busy: kotlinx.coroutines.flow.StateFlow<Boolean> = _busy
+
     companion object {
         private const val TAG = "TaskOrchestrator"
+        /** Poll granularity for the post-cancel stop confirmation. */
+        private const val STOP_CONFIRM_POLL_MS = 100L
+        /** How long to wait for a graceful stop before escalating to a hard shutdown. */
+        private const val STOP_CONFIRM_TIMEOUT_MS = 30_000L
+        /** Extra grace after the hard shutdown before giving up and reporting the stall. */
+        private const val STOP_FORCE_TIMEOUT_MS = 15_000L
+        /** Interval between repeated interrupt nudges while waiting. */
+        private const val STOP_NAG_INTERVAL_MS = 2_000L
     }
+
+    private val stopHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var stopConfirmRunnable: Runnable? = null
+    private var stopDeadlineAt = 0L
+    private var stopEscalated = false
+    private var lastNagAt = 0L
 
     // User image handoff fields
     private var pendingUserImageLatch: java.util.concurrent.CountDownLatch? = null
@@ -122,13 +158,23 @@ class TaskOrchestrator(
         autoReturnToChat: Boolean = true,
         isBatch: Boolean = false
     ): Boolean {
-        return taskSessionStore.tryAcquire(
+        val acquired = taskSessionStore.tryAcquire(
             messageId = messageId,
             channel = channel,
             taskText = taskText,
             autoReturnToChat = autoReturnToChat,
             isBatch = isBatch,
         )
+        if (acquired) {
+            lastOwnerMode = if (isBatch) {
+                io.agents.bqaagent.TaskRunMode.BATCH
+            } else {
+                io.agents.bqaagent.TaskRunMode.CHAT
+            }
+            stallReported = false
+            publishBusy()
+        }
+        return acquired
     }
 
     private fun releaseTask(outcome: RecordingOutcome = RecordingOutcome.UNKNOWN): TaskSessionState {
@@ -136,6 +182,7 @@ class TaskOrchestrator(
         // Non-blocking: hands the tail-off to the recorder's own single-thread scheduler.
         // A no-op when recording is off or nothing was ever armed.
         TaskRecordingCoordinator.stop(outcome)
+        publishBusy()
         return state
     }
 
@@ -164,36 +211,249 @@ class TaskOrchestrator(
 
     fun isTaskRunning(): Boolean = taskSessionStore.isTaskRunning()
 
+    /**
+     * The single truth every UI gate must consult (C1/C2). A released session alone is NOT proof of
+     * an idle system: the engine and the pipeline threads outlive the lock, which is exactly the
+     * window that used to leave an unobservable loop driving the device.
+     */
+    fun isBusy(): Boolean = _busy.value
+
+    fun busyNow(): Boolean {
+        if (taskSessionStore.isTaskRunning()) return true
+        if (::agentService.isInitialized && agentService.isRunning()) return true
+        return activeWorkers.isNotEmpty()
+    }
+
+    private fun publishBusy() {
+        _busy.value = busyNow()
+    }
+
+    /**
+     * Phase-2 confirmed-stop predicate. Deliberately NOT busyNow(): the session being confirmed sits
+     * in STOPPING for the entire window and busyNow() counts that as busy — using it here could never
+     * report quiesced, so EVERY cancel would escalate to shutdown() and falsely claim the task did
+     * not stop. Only the engine and the worker threads prove liveness at this point; the session
+     * lock is released by the finalize step itself.
+     */
+    private fun engineQuiesced(): Boolean {
+        if (::agentService.isInitialized && agentService.isRunning()) return false
+        return activeWorkers.isEmpty()
+    }
+
+    /**
+     * Spawn a registered, daemon worker. Removal happens inside the thread so an abrupt exit still
+     * clears the busy accounting.
+     */
+    private fun launchWorker(name: String, body: () -> Unit) {
+        val t = Thread({
+            try {
+                body()
+            } finally {
+                activeWorkers.remove(Thread.currentThread())
+                publishBusy()
+            }
+        }, name)
+        t.isDaemon = true
+        activeWorkers.add(t)
+        publishBusy()
+        t.start()
+    }
+
+    /**
+     * Block the CALLING thread until every owned worker/engine has settled. Only ever invoked from a
+     * background thread (the batch driver); the main thread must use [busy]/[busyNow].
+     */
+    fun awaitIdle(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (busyNow()) {
+            if (System.currentTimeMillis() >= deadline) return false
+            try {
+                Thread.sleep(200L)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * Which mode owns the workspace right now. Used by both screens to disable the cross-mode entry
+     * and by both launch paths as the authoritative backend rejection.
+     */
+    fun ownerMode(): io.agents.bqaagent.TaskRunMode =
+        if (taskSessionStore.isTaskRunning() || busyNow()) {
+            val m = taskSessionStore.snapshot().mode
+            if (m == io.agents.bqaagent.TaskRunMode.NONE) {
+                // Orphan case (engine still busy, lock already gone): keep the last known owner so the
+                // gate stays closed instead of flipping to NONE mid-teardown.
+                lastOwnerMode
+            } else m
+        } else {
+            io.agents.bqaagent.TaskRunMode.NONE
+        }
+
+    @Volatile
+    private var lastOwnerMode: io.agents.bqaagent.TaskRunMode = io.agents.bqaagent.TaskRunMode.NONE
+
+    /** A stall over an already-released session can only be reported from here, so report it once. */
+    @Volatile
+    private var stallReported = false
+
     // ==================== Task Execution ====================
 
-    fun cancelCurrentTask() {
-        if (!taskSessionStore.markStopping()) return
-        // Interrupt an in-flight replay; its loop polls this flag between phases.
-        activeReplayer?.cancel()
-        // Release any pending user image wait so the agent thread doesn't hang
-        cleanupPendingUserImage()
+    /**
+     * Cancel the in-flight task. Three phases (C2):
+     *  1. intent   — flip the session to STOPPING and fire every interrupt lever available;
+     *  2. confirm  — poll until the engine and all worker threads are provably gone;
+     *  3. finalize — only then release the lock, publish the terminal event and hand the UI back.
+     *
+     * The previous implementation announced the cancellation first (release + terminal event) and
+     * called agentService.cancel() last, ungarded and untried, so the UI could unlock while the loop
+     * kept driving the device — and a second tap was a complete no-op behind the one-shot gate.
+     * Idempotent by design: repeated taps, the driver's nag and a foreign-mode stop request all
+     * re-execute phase 1 instead of silently returning.
+     */
+    fun cancelCurrentTask(source: String = "unknown") {
+        val sessionStopping = taskSessionStore.requestStop()
+        XLog.i(TAG, "Cancellation requested source=$source sessionStopping=$sessionStopping busy=${busyNow()}")
+
+        // ---- phase 1: interrupt. Must run even when the session lock is already gone, otherwise an
+        // orphaned loop can never be stopped by any entry point.
+        runCatching { activeReplayer?.cancel() }
+        runCatching { cleanupPendingUserImage() }
         pendingUserImageLatch?.countDown()
-        // Release a pending replay confirmation so the pipeline thread doesn't hang
         pendingReplayConfirmLatch?.countDown()
-        // Release a pending sensitive confirmation so the agent/replay thread doesn't hang
         pendingSensitiveConfirmLatch?.countDown()
-        val cancelledSession = releaseTask(RecordingOutcome.CANCELLED)
-        taskEventCallback?.invoke(TaskEvent.Cancelled)
-        ForegroundService.resetToIdle(ClawApplication.instance)
-        if (cancelledSession.channel != null && cancelledSession.messageId.isNotEmpty()) {
-            ChannelManager.sendMessage(
-                cancelledSession.channel,
-                ClawApplication.instance.getString(R.string.channel_msg_task_cancelled),
-                cancelledSession.messageId
-            )
-            ChannelManager.flushMessages(cancelledSession.channel)
-        }
-        FloatingCircleManager.setCancelledState()
-        onTaskFinished()
+        pendingAnalysisLatch?.countDown()
         if (::agentService.isInitialized) {
-            agentService.cancel()
+            runCatching { agentService.cancel() }
         }
-        XLog.d(TAG, "Current task cancellation requested")
+        // Pipeline / replay / skill threads are fire-and-forget by design; interrupting the registered
+        // handles is what bounds the time spent in LLM waits and inter-step sleeps.
+        val workers = activeWorkers.toList()
+        for (w in workers) {
+            runCatching { if (w.state != Thread.State.TERMINATED) w.interrupt() }
+        }
+        publishBusy()
+        if (workers.isNotEmpty() || ::agentService.isInitialized) {
+            FloatingCircleManager.setCancellingState()
+        }
+
+        if (!sessionStopping && !busyNow()) {
+            // Nothing is running and nothing is stopping: settle the UI immediately so a stray tap
+            // can never leave the screens locked.
+            finalizeCancellation(stalled = false, immediate = true)
+            return
+        }
+
+        // ---- phase 2: confirm. Bounded, escalating, never unlocks on a timer alone.
+        if (stopConfirmRunnable == null) {
+            stopDeadlineAt = System.currentTimeMillis() + STOP_CONFIRM_TIMEOUT_MS
+            stopEscalated = false
+            lastNagAt = 0L
+            val r = object : Runnable {
+                override fun run() {
+                    onStopConfirmTick(this)
+                }
+            }
+            stopConfirmRunnable = r
+            stopHandler.postDelayed(r, STOP_CONFIRM_POLL_MS)
+        }
+    }
+
+    private fun onStopConfirmTick(runnable: Runnable) {
+        stopConfirmRunnable = null
+        val quiesced = engineQuiesced()
+        if (quiesced) {
+            XLog.i(TAG, "Cancellation confirmed: engine and workers all stopped")
+            finalizeCancellation(stalled = false, immediate = false)
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        // Keep re-firing the levers: a flag set before a long blocking call may never be observed by
+        // that call, and the session may already have moved from STOPPING to finalizing.
+        if (now - lastNagAt >= STOP_NAG_INTERVAL_MS) {
+            lastNagAt = now
+            runCatching { activeReplayer?.cancel() }
+            if (::agentService.isInitialized) runCatching { agentService.cancel() }
+            pendingUserImageLatch?.countDown()
+            pendingReplayConfirmLatch?.countDown()
+            pendingSensitiveConfirmLatch?.countDown()
+            pendingAnalysisLatch?.countDown()
+        }
+
+        if (now >= stopDeadlineAt) {
+            if (!stopEscalated) {
+                stopEscalated = true
+                stopDeadlineAt = now + STOP_FORCE_TIMEOUT_MS
+                XLog.w(TAG, "Graceful stop not confirmed after ${STOP_CONFIRM_TIMEOUT_MS}ms — forcing shutdown")
+                if (::agentService.isInitialized) runCatching { agentService.shutdown() }
+                for (w in activeWorkers.toList()) {
+                    runCatching { if (w.state != Thread.State.TERMINATED) w.interrupt() }
+                }
+            } else {
+                XLog.e(TAG, "Forced stop not confirmed after ${STOP_FORCE_TIMEOUT_MS}ms — reporting stall")
+                finalizeCancellation(stalled = true, immediate = false)
+                return
+            }
+        }
+        stopConfirmRunnable = runnable
+        stopHandler.postDelayed(runnable, STOP_CONFIRM_POLL_MS)
+    }
+
+    /**
+     * Phase 3: publish the outcome. Runs exactly once per cancellation (beginFinalize), and only
+     * after the stop has been confirmed — unless [stalled], where the user is told the truth instead
+     * of a fake success while `busy` keeps the cross-mode gate closed.
+     */
+    private fun finalizeCancellation(stalled: Boolean, immediate: Boolean) {
+        stopConfirmRunnable?.let { stopHandler.removeCallbacks(it) }
+        stopConfirmRunnable = null
+        if (!immediate && !taskSessionStore.beginFinalize()) {
+            // Either the loop settled on its own and already released the session, or another
+            // finalize won the claim. A stall is the exception: an orphaned loop whose lock is gone
+            // would otherwise never tell the user the stop failed, leaving the UI on "Stopping…".
+            val orphanStall = stalled &&
+                    taskSessionStore.snapshot().phase == TaskSessionPhase.IDLE && !stallReported
+            if (!orphanStall) {
+                publishBusy()
+                return
+            }
+            stallReported = true
+        }
+        val cancelledSession = releaseTask(RecordingOutcome.CANCELLED)
+        lastOwnerMode = io.agents.bqaagent.TaskRunMode.NONE
+        val terminal: TaskEvent = if (stalled) {
+            TaskEvent.Failed(
+                ClawApplication.instance.getString(R.string.task_cancel_not_stopped),
+                TaskReasonCode.USER_CANCEL
+            )
+        } else {
+            TaskEvent.Cancelled
+        }
+        runCatching { taskEventCallback?.invoke(terminal) }
+        runCatching { ForegroundService.resetToIdle(ClawApplication.instance) }
+        if (cancelledSession.channel != null && cancelledSession.messageId.isNotEmpty()) {
+            runCatching {
+                ChannelManager.sendMessage(
+                    cancelledSession.channel,
+                    ClawApplication.instance.getString(R.string.channel_msg_task_cancelled),
+                    cancelledSession.messageId
+                )
+                ChannelManager.flushMessages(cancelledSession.channel)
+            }
+        }
+        runCatching {
+            if (stalled) FloatingCircleManager.setErrorState() else FloatingCircleManager.setCancelledState()
+        }
+        runCatching { onTaskFinished() }
+        publishBusy()
+        // The cancel path tore down the shared kadb client on an interrupted thread; probe once on
+        // a clean IO thread so the UI doesn't sit on a stale "Disconnected" until the 30s heartbeat.
+        runCatching { LocalAdbAutomation.refreshReadyAsync() }
+        XLog.i(TAG, "Cancellation finalized stalled=$stalled session=${cancelledSession.messageId}")
     }
 
     fun provideUserImage(imagePath: String?) {
@@ -344,10 +604,55 @@ class TaskOrchestrator(
         isFallback: Boolean = false,
         batchRun: BatchRunContext? = null,
     ) {
+        // A fallback re-entry (Skill/Replay -> AgentLoop) of a session the user already cancelled
+        // must never resurrect it. Without this gate the degraded AgentLoop re-acquires the released
+        // STOPPING lock (stopRequested reset to false) and starts a brand-new run that no entry
+        // point can stop — the UI already shows "cancelled" while the device keeps being driven.
+        if (isFallback && taskSessionStore.wasStopped(messageID)) {
+            XLog.i(TAG, "Fallback suppressed — session $messageID was cancelled by user")
+            return
+        }
+        val requestedMode = if (batchRun != null) {
+            io.agents.bqaagent.TaskRunMode.BATCH
+        } else {
+            io.agents.bqaagent.TaskRunMode.CHAT
+        }
+        // Cross-mode exclusion, backend gate (C1). A fallback re-entry of the SAME session is always
+        // allowed; anything else that arrives while the other mode owns the workspace is rejected here,
+        // so even a recreated Activity or a stray channel command cannot start a second run.
+        if (taskSessionStore.isTaskRunning()) {
+            val current = taskSessionStore.snapshot()
+            val sameSession = current.messageId == messageID && current.channel == channel
+            if (!sameSession && current.mode != requestedMode) {
+                XLog.w(TAG, "Rejected $requestedMode task '${task.take(40)}': $requestedMode vs ${current.mode}")
+                taskEventCallback?.invoke(
+                    TaskEvent.Failed(
+                        ClawApplication.instance.getString(
+                            if (current.mode == io.agents.bqaagent.TaskRunMode.BATCH) {
+                                R.string.mode_lock_batch_busy
+                            } else {
+                                R.string.mode_lock_chat_busy
+                            }
+                        ),
+                        TaskReasonCode.OTHER
+                    )
+                )
+                return
+            }
+        } else if (busyNow()) {
+            // Lock is gone but something is still alive: a previous task has not finished stopping.
+            taskEventCallback?.invoke(
+                TaskEvent.Failed(
+                    ClawApplication.instance.getString(R.string.mode_lock_stopping),
+                    TaskReasonCode.OTHER
+                )
+            )
+            return
+        }
         // The pipeline contains blocking LLM calls (SkillAnalyzer). Running it on
         // the caller thread would freeze the chat UI and trigger an ANR when
         // invoked from the UI thread, so always run it on a worker thread.
-        Thread({
+        launchWorker("task-pipeline") {
             startNewTaskInternal(
                 channel,
                 task,
@@ -356,7 +661,7 @@ class TaskOrchestrator(
                 isFallback,
                 batchRun
             )
-        }, "task-pipeline").start()
+        }
     }
 
     private fun startNewTaskInternal(
@@ -431,7 +736,7 @@ class TaskOrchestrator(
 
             is PipelineRouter.Route.DirectTool -> {
                 XLog.i(TAG, "Pipeline Tier 1: DirectTool — ${route.toolName}")
-                Thread({
+                launchWorker("direct-tool-${route.toolName}") {
                     TaskRecordingCoordinator.start("direct-tool:${route.toolName}")
                     var success = false
                     val answer = try {
@@ -478,7 +783,7 @@ class TaskOrchestrator(
                         onTaskFinished()
                     }
                     XLog.i(TAG, "onComplete: rounds=0, totalTokens=0, model=direct, answer=$answer")
-                }, "direct-tool-${route.toolName}").start()
+                }
                 return
             }
 
@@ -494,7 +799,7 @@ class TaskOrchestrator(
                     if (skill != null) {
                         FloatingCircleManager.ensureShowing()
                         FloatingCircleManager.showTaskNotify(task, channel)
-                        Thread({
+                        launchWorker("skill-executor-${route.skillId}") {
                             TaskRecordingCoordinator.start("skill:${route.skillId}")
                             val skillResult =
                                 skillExecutor.execute(skill, route.params) { step, total, desc ->
@@ -541,7 +846,7 @@ class TaskOrchestrator(
                                 )
                                 startNewTask(channel, fallbackGoal, messageID, isFallback = true)
                             }
-                        }, "skill-executor").start()
+                        }
                         return
                     }
                     XLog.w(TAG, "Skill ${route.skillId} not found, falling through to agent loop")
@@ -586,6 +891,13 @@ class TaskOrchestrator(
                         if (KVUtils.isLlmSkillMatchingEnabled()) SkillAnalyzer.analyze(task) else null
                     SkillMatcher.match(task, analysis)
                 }.getOrDefault(SkillMatchResult.NoMatch)
+
+                // A cancel that landed during the blocking analysis must not continue into a replay
+                // or an agent loop; the session is already on its way to STOPPING.
+                if (!isCurrentSessionActive()) {
+                    XLog.i(TAG, "Batch task cancelled during JIT matching — aborting dispatch")
+                    return
+                }
 
                 // Transparency: state HOW this task will actually run, from the live match plus switches
                 // C (preferReplay) and B (autoSaveSkill).
@@ -640,17 +952,23 @@ class TaskOrchestrator(
                         // the UI thread, so run it on a worker thread with a hard timeout.
                         val analysisHolder = arrayOfNulls<SkillAnalysis>(1)
                         val analyzeLatch = java.util.concurrent.CountDownLatch(1)
-                        Thread({
+                        pendingAnalysisLatch = analyzeLatch
+                        launchWorker("skill-analyzer") {
                             try {
                                 analysisHolder[0] = SkillAnalyzer.analyze(task)
                             } catch (e: Exception) {
                                 XLog.w(TAG, "Skill analysis failed: ${e.message}")
                             } finally {
+                                pendingAnalysisLatch = null
                                 analyzeLatch.countDown()
                             }
-                        }, "skill-analyzer").start()
+                        }
                         if (!analyzeLatch.await(300, java.util.concurrent.TimeUnit.SECONDS)) {
                             XLog.w(TAG, "Skill analysis timed out after 300s, treating as no match")
+                        }
+                        if (!isCurrentSessionActive()) {
+                            XLog.i(TAG, "Task cancelled during skill analysis — aborting pipeline")
+                            return
                         }
                         analysisHolder[0]
                     } else {
@@ -707,7 +1025,7 @@ class TaskOrchestrator(
                         if (replayConfirmed) {
                             FloatingCircleManager.ensureShowing()
                             FloatingCircleManager.showTaskNotify(task, channel)
-                            Thread({
+                            launchWorker("skill-replayer") {
                                 taskEventCallback?.invoke(
                                     TaskEvent.ReplayStart(
                                         match.skill.title,
@@ -768,7 +1086,8 @@ class TaskOrchestrator(
                                     // Scenario 4: replay succeeded — bring user back to chat UI first
                                     returnToAgentApp()
                                     val answer =
-                                        "✅ Replay succeeded — skill \"${match.skill.title}\"\n${replayResult.message}"
+                                        "✅ Replay succeeded — skill \"${match.skill.title}\"\n${replayResult.message}" +
+                                                verificationWarningSuffix(replayResult.warnings)
                                     ChannelManager.sendMessage(channel, answer, messageID)
                                     taskEventCallback?.invoke(TaskEvent.Completed(answer))
                                     releaseTask(RecordingOutcome.COMPLETED)
@@ -815,9 +1134,16 @@ class TaskOrchestrator(
                                             "Replay failed"
                                         )
                                     )
-                                    startNewTask(channel, task, messageID, isFallback = true)
+                                    if (!taskSessionStore.wasStopped(messageID)) {
+                                        startNewTask(channel, task, messageID, isFallback = true)
+                                    } else {
+                                        XLog.i(
+                                            TAG,
+                                            "Replay failed but session already cancelled — skipping AgentLoop fallback"
+                                        )
+                                    }
                                 }
-                            }, "skill-replayer").start()
+                            }
                             return
                         }
                     }
@@ -1030,10 +1356,16 @@ class TaskOrchestrator(
                 status: TaskStatus,
                 reasonCode: String?
             ) {
+                // Final gate before handing the prompt to the engine. Between here and the session check
+                // above the pipeline may have been cancelled (analysis wait, settle sleeps, a foreign-mode
+                // stop), and starting a loop past this point used to produce an unobservable run.
                 if (!isCurrentSessionActive()) {
-                    XLog.i(TAG, "Ignoring stale onComplete after task cancellation")
+                    XLog.i(TAG, "Task cancelled before agent loop dispatch — not starting loop")
                     return
                 }
+
+                // Per-round message buffer for channel messaging
+                val roundBuffer = StringBuilder()
                 XLog.i(
                     TAG,
                     "onComplete: rounds=$round, totalTokens=$totalTokens, model=$modelName, status=$status, reason=$reasonCode, answer=$finalAnswer"
@@ -1195,6 +1527,23 @@ class TaskOrchestrator(
                 onTaskFinished()
             }
 
+            /**
+             * Session liveness for the loop's own stop predicate. The lock is only released after a
+             * confirmed stop, so `false` here means either the user cancelled (STOPPING is enough) or
+             * the session moved on — both require the loop to stop touching the device at once.
+             */
+            override fun isSessionCancelled(): Boolean =
+                !isCurrentSessionActive() || taskSessionStore.snapshot().isStopping
+
+            /**
+             * The engine just cleared `running` — possibly long after a stall was reported and with
+             * its terminal callback suppressed. Re-publish liveness now: this is what finally opens
+             * the cross-mode gate once the orphaned loop is genuinely gone.
+             */
+            override fun onEngineSettled() {
+                publishBusy()
+            }
+
             override fun onSystemDialogBlocked(round: Int, totalTokens: Int) {
                 if (!isCurrentSessionActive()) return
                 XLog.w(TAG, "onSystemDialogBlocked: round=$round, totalTokens=$totalTokens")
@@ -1312,14 +1661,12 @@ class TaskOrchestrator(
                 actionSummary: String,
                 riskType: String,
                 timeoutMs: Long
-            ): Boolean {
-                return awaitSensitiveConfirmation(
-                    { isCurrentSessionActive() },
-                    actionSummary,
-                    riskType,
-                    timeoutMs
-                )
-            }
+            ): Boolean = awaitSensitiveConfirmation(
+                { isCurrentSessionActive() },
+                actionSummary,
+                riskType,
+                timeoutMs
+            )
         })
     }
 
@@ -1344,7 +1691,7 @@ class TaskOrchestrator(
     ) {
         FloatingCircleManager.ensureShowing()
         FloatingCircleManager.showTaskNotify(task, channel)
-        Thread({
+        launchWorker("batch-skill-replayer") {
             taskEventCallback?.invoke(TaskEvent.ReplayStart(skill.title, template.steps.size))
             // After ReplayStart and before any device action, so recording never starts mid-gesture.
             TaskRecordingCoordinator.start("replay:${skill.skillId}")
@@ -1395,7 +1742,8 @@ class TaskOrchestrator(
             if (replayResult.success) {
                 // Batch: do NOT returnToAgentApp — the driver resets/navigates before the next task.
                 val answer =
-                    "✅ Replay succeeded — skill \"${skill.title}\"\n${replayResult.message}"
+                    "✅ Replay succeeded — skill \"${skill.title}\"\n${replayResult.message}" +
+                            verificationWarningSuffix(replayResult.warnings)
                 ChannelManager.sendMessage(channel, answer, messageID)
                 taskEventCallback?.invoke(TaskEvent.Completed(answer))
                 releaseTask(RecordingOutcome.COMPLETED)
@@ -1434,9 +1782,16 @@ class TaskOrchestrator(
                 taskEventCallback?.invoke(
                     TaskEvent.ToolResult("Retrying with AI agent", false, "Replay failed")
                 )
-                startNewTask(channel, task, messageID, isFallback = true)
+                if (!taskSessionStore.wasStopped(messageID)) {
+                    startNewTask(channel, task, messageID, isFallback = true)
+                } else {
+                    XLog.i(
+                        TAG,
+                        "Batch replay failed but session already cancelled — skipping AgentLoop fallback"
+                    )
+                }
             }
-        }, "batch-skill-replayer").start()
+        }
     }
 
     /**
@@ -1476,6 +1831,19 @@ class TaskOrchestrator(
                     "🤖 No matching skill — running with AI (auto-save off)"
         }
         taskEventCallback?.invoke(TaskEvent.Progress(0, note))
+    }
+
+    /**
+     * Verification warnings never stopped a replay, but a run that finished on plausible rather
+     * than confirmed evidence must not be reported as a clean success: the suffix is the user's
+     * cue that the template may need re-recording. Empty list -> empty string, so ordinary
+     * replays keep their existing message text byte for byte.
+     */
+    private fun verificationWarningSuffix(warnings: List<String>): String {
+        if (warnings.isEmpty()) return ""
+        val preview = warnings.take(3).joinToString("; ")
+        val more = if (warnings.size > 3) "; +${warnings.size - 3} more" else ""
+        return "\n⚠️ ${warnings.size} step(s) verified with warning: $preview$more"
     }
 
     /**

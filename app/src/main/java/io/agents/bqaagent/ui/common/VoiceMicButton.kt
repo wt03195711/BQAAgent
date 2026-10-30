@@ -30,6 +30,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -71,6 +72,7 @@ fun VoiceMicButton(
     iconSize: Dp = 22.dp,
     idleBackground: Color = Color.Transparent,
     idleBorder: Color = Color.Transparent,
+    enabled: Boolean = true,
 ) {
     if (!voiceEnabled) return
 
@@ -126,6 +128,7 @@ fun VoiceMicButton(
         contentAlignment = Alignment.Center,
         modifier = modifier
             .size(buttonSize)
+            .alpha(if (enabled) 1f else 0.35f)
             .then(
                 if (isVoiceRecording) {
                     Modifier
@@ -142,10 +145,15 @@ fun VoiceMicButton(
                         .border(1.dp, idleBorder, CircleShape)
                 }
             )
-            .pointerInput(Unit) {
+            .pointerInput(enabled) {
                 awaitEachGesture {
                     val down = awaitFirstDown()
                     down.consume()
+
+                    if (!enabled) {
+                        waitForUpOrCancellation()
+                        return@awaitEachGesture
+                    }
 
                     if (isClickProcessing) {
                         waitForUpOrCancellation()

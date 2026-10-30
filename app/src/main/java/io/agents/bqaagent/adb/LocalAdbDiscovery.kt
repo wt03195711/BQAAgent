@@ -31,18 +31,7 @@ object LocalAdbDiscovery {
         val connectPort: Int? = null,
         val pairHost: String? = null,
         val pairPort: Int? = null,
-    ) {
-        fun toSetupPreset(fallback: String): String {
-            val savedRequest = LocalAdbAutomation.parseSetupInput(fallback)
-            val setupHost = connectHost ?: pairHost ?: host
-            return when {
-                connectPort != null && pairPort != null -> "$setupHost:$connectPort $pairPort "
-                connectPort != null -> "$setupHost:$connectPort"
-                pairPort != null && savedRequest != null -> "${savedRequest.host}:${savedRequest.connectPort} $pairPort "
-                else -> fallback
-            }
-        }
-    }
+    )
 
     @JvmStatic
     fun discoverBlocking(context: Context, timeoutMs: Long = 3_500L): Result {

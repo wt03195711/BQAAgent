@@ -33,6 +33,16 @@ class AppViewModel : ViewModel() {
     val inProgressTaskMessageId: String get() = taskSessionStore.snapshot().messageId
     val inProgressTaskChannel: Channel? get() = taskSessionStore.snapshot().channel
 
+    /**
+     * Shared workspace gate for both modes. Chat and batch read the SAME flow, so neither can offer a
+     * Start/Send control while the other mode still owns the engine, and "stopping" is visible in both.
+     */
+    val taskBusy: kotlinx.coroutines.flow.StateFlow<Boolean> get() = taskOrchestrator.busy
+
+    fun ownerMode(): io.agents.bqaagent.TaskRunMode = taskOrchestrator.ownerMode()
+
+    fun isStopping(): Boolean = taskSessionStore.snapshot().isStopping
+
     // ==================== Task API (clean interface for Activity) ====================
 
     /**
@@ -47,8 +57,16 @@ class AppViewModel : ViewModel() {
         agentPromptOverride: String? = null,
         onEvent: (TaskEvent) -> Unit,
     ) {
-        if (isTaskRunning()) {
-            onEvent(TaskEvent.Failed("Another task is still running. Stop it first."))
+        if (isTaskRunning() || taskOrchestrator.busyNow()) {
+            val msgRes = if (ownerMode() == io.agents.bqaagent.TaskRunMode.BATCH) {
+                io.agents.bqaagent.R.string.mode_lock_batch_busy
+            } else {
+                io.agents.bqaagent.R.string.mode_lock_stopping
+            }
+            onEvent(io.agents.bqaagent.TaskEvent.Failed(
+                androidContext().getString(msgRes),
+                io.agents.bqaagent.TaskReasonCode.OTHER
+            ))
             return
         }
         onBeforeTask?.invoke()
@@ -56,8 +74,17 @@ class AppViewModel : ViewModel() {
         taskOrchestrator.startNewTask(Channel.LOCAL, task, taskId, agentPromptOverride = agentPromptOverride)
     }
 
+    /**
+     * Stop entry shared by the chat button and the floating pill. Routes to the live batch driver when
+     * the batch owns the workspace so "cancel" means the whole batch, not just the current item.
+     */
     fun stopTask() {
-        taskOrchestrator.cancelCurrentTask()
+        val batch = io.agents.bqaagent.ui.batch.BatchTaskDriver.active()
+        if (batch != null && (taskSessionStore.snapshot().isBatch || batch.isRunning)) {
+            batch.cancel()
+            return
+        }
+        taskOrchestrator.cancelCurrentTask(source = if (taskSessionStore.snapshot().isBatch) "batch-ui" else "chat-ui")
     }
 
     fun isTaskRunning(): Boolean = taskSessionStore.isTaskRunning()
@@ -122,6 +149,8 @@ class AppViewModel : ViewModel() {
             }
             FloatingCircleManager.onStopTask = {
                 XLog.i(TAG, "Stop task requested from floating pill")
+                // The pill is a router, not a third policy: it dispatches to whichever mode owns the
+                // session, so pill / chat button / batch button all mean the same confirmed stop.
                 stopTask()
                 bringAppToForeground()
             }
@@ -135,23 +164,32 @@ class AppViewModel : ViewModel() {
 
     /**
      * Bring the app to the foreground — routed to the mode the user was last in.
-     * Chat → ComposeChatActivity, Batch → BatchActivity. The same value drives cold-start
-     * UI restoration (KVUtils.getLastUiMode()), so the pill returns you to the right screen.
+     * While a task owns the workspace, the OWNER mode wins over the last-visited marker so the
+     * pill always returns to the screen that hosts the running task's UI.
+     * Chat → ComposeChatActivity, Batch → BatchActivity.
      */
     private fun bringAppToForeground() {
         val context = ClawApplication.instance
-        val target = when (KVUtils.getLastUiMode()) {
-            io.agents.bqaagent.ui.batch.BatchUiMode.BATCH ->
+        val owner = ownerMode()
+        val target = when {
+            owner == io.agents.bqaagent.TaskRunMode.BATCH ->
+                io.agents.bqaagent.ui.batch.BatchActivity::class.java
+            owner == io.agents.bqaagent.TaskRunMode.CHAT ->
+                io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java
+            KVUtils.getLastUiMode() == io.agents.bqaagent.ui.batch.BatchUiMode.BATCH ->
                 io.agents.bqaagent.ui.batch.BatchActivity::class.java
             else ->
                 io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java
         }
         val intent = android.content.Intent(context, target).apply {
             flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or
                     android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         context.startActivity(intent)
     }
+
+    private fun androidContext(): android.content.Context = ClawApplication.instance
 
     // Old pass-through methods removed — use startTask/stopTask/isTaskRunning/clearTaskCallback instead
 

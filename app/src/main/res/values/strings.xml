@@ -516,5 +516,12 @@
     <string name="settings_skill_capture_off_toast">Skill Capture Mode off: tasks follow chat history again, skill saving disabled</string>
     <string name="common_got_it">Got it</string>
     <string name="settings_sensitive_mode_subtitle">Confirm before tasks touch payments or passwords</string>
+    <string name="chat_stopping">Stopping…</string>
+    <string name="mode_lock_batch_busy">A batch run is in progress. Stop it before starting a chat task.</string>
+    <string name="mode_lock_chat_busy">A chat task is running. Stop it before starting a batch run.</string>
+    <string name="mode_lock_stopping">The previous task is still stopping. Wait until it finishes.</string>
+    <string name="mode_lock_batch_running_locked">Batch run in progress — switching to chat is locked until the run stops.</string>
+    <string name="mode_lock_chat_running_locked">A task is running — leaving this screen is locked until the task stops.</string>
+    <string name="task_cancel_not_stopped">The background task did not stop completely. The workspace stays locked until it exits; check Local ADB and the target app.</string>
 
 </resources>

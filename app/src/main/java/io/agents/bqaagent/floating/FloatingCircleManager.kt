@@ -4,8 +4,11 @@
 package io.agents.bqaagent.floating
 
 import android.app.Application
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.res.Resources
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.view.MotionEvent
@@ -24,6 +27,8 @@ import com.lzf.easyfloat.enums.ShowPattern
 import com.lzf.easyfloat.enums.SidePattern
 import com.lzf.easyfloat.interfaces.OnFloatCallbacks
 import com.lzf.easyfloat.utils.DisplayUtils
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Floating window manager (EasyFloat based, draggable, remembers position).
@@ -60,20 +65,31 @@ object FloatingCircleManager {
     private var dockedSide: DockSide = DockSide.LEFT
     private var currentChannel: Channel? = null
     private var currentTokenState: io.agents.bqaagent.agent.TokenMonitor.State = io.agents.bqaagent.agent.TokenMonitor.State.NORMAL
+    // Set when the agent loop auto-hides the pill mid-task because the target app
+    // behaved like it rejects touches while an overlay is present (inert taps).
+    // While set, show()/ensureShowing() stay quiet; any terminal setState releases it.
+    private var taskSuppressed = false
 
     private const val TASK_NOTIFY_DURATION_MS = 3000L // show task text for 3s before collapsing to RUNNING
 
     // Intent scroll: one-shot right→left pan that stops at the text tail (no loop, no blank).
-    private const val INTENT_SCROLL_PX_PER_MS = 0.1f
-    private const val INTENT_SCROLL_START_DELAY_MS = 600L
-    private const val INTENT_MIN_SCROLL_MS = 800L
-    private const val INTENT_MAX_SCROLL_MS = 8000L
+    // Speed is measured in DIP so it feels the same on any density. 30dp/s ≈ 1 CJK char/s at
+    // 13sp, which is a comfortable reading pace (previous 0.1px/ms ≈ 3× too fast on xxhdpi).
+    private const val INTENT_SCROLL_DP_PER_MS = 0.03f
+    private const val INTENT_SCROLL_START_DELAY_MS = 700L
+    private const val INTENT_MIN_SCROLL_MS = 1500L
+    private const val INTENT_MAX_SCROLL_MS = 15000L
+    // Dwell time after the intent becomes fully visible (either instantly, or once the scroll
+    // reaches the tail). After this the pill collapses back to "Step N" only, so a completed
+    // intent never keeps eating horizontal space while the next round is still thinking.
+    private const val INTENT_HIDE_AFTER_MS = 3000L
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var notifyCollapseRunnable: Runnable? = null
     private var pendingTaskText: String = ""
     private var currentIntent: String = ""
     private var intentScrollAnimator: ValueAnimator? = null
+    private var intentHideRunnable: Runnable? = null
 
     private var appRef: Application? = null
 
@@ -99,6 +115,10 @@ object FloatingCircleManager {
 
         if (!KVUtils.isFloatingWindowEnabled()) {
             XLog.i("FloatingCircle", "show() skipped — floating window feature is off")
+            return
+        }
+        if (taskSuppressed) {
+            XLog.i("FloatingCircle", "show() skipped — auto-hidden for this task (target app overlay sensitivity)")
             return
         }
 
@@ -198,8 +218,13 @@ object FloatingCircleManager {
         EasyFloat.dismiss(FLOAT_TAG, true)
         isShowing = false
         currentState = State.IDLE
+        isCancelling = false
+        // Feature toggle off / explicit hide: drop suppression too — the next show()
+        // must start from a clean slate.
+        taskSuppressed = false
         creationGeneration++
         cancelNotifyCollapse()
+        cancelIntentHide()
         intentScrollAnimator?.cancel()
         intentScrollAnimator = null
     }
@@ -215,6 +240,11 @@ object FloatingCircleManager {
         }
 
         if (!KVUtils.isFloatingWindowEnabled()) {
+            return
+        }
+        // Same gate as show(): TaskOrchestrator calls ensureShowing() at every task
+        // start; without it the suppression would be undone on the next task round.
+        if (taskSuppressed) {
             return
         }
 
@@ -284,6 +314,12 @@ object FloatingCircleManager {
         val view = EasyFloat.getFloatView(FLOAT_TAG) ?: return
         val tvStep = view.findViewById<TextView>(R.id.tvStep) ?: return
         val tvIntent = view.findViewById<TextView>(R.id.tvIntent)
+        if (isCancelling) {
+            tvStep.text = ""
+            applyIntentText(tvIntent, stoppingLabel())
+            view.post { enforceEdgeDocking(view, resolveSide = false) }
+            return
+        }
         tvStep.text = if (currentRound > 0) "Step $currentRound" else ""
         applyIntentText(tvIntent, currentIntent)
         // The intent length can grow/shrink the pill. Re-glue to the docked edge after layout so a
@@ -294,12 +330,15 @@ object FloatingCircleManager {
     /**
      * Show the intent text directly (no marquee fade-in). If it exceeds the fixed 160dp line,
      * scroll it once from right to left (revealing the tail) and STOP there — never loops,
-     * never leaves blank. Short text simply sits at scroll offset 0.
+     * never leaves blank. Short text simply sits at scroll offset 0. After the text has been
+     * fully visible for [INTENT_HIDE_AFTER_MS] the intent collapses away and only "Step N"
+     * remains, so the pill reclaims its horizontal footprint while the agent is still thinking.
      */
     private fun applyIntentText(tvIntent: TextView?, text: String) {
         if (tvIntent == null) return
         intentScrollAnimator?.cancel()
         intentScrollAnimator = null
+        cancelIntentHide()
         // Show the FULL text on one horizontally-scrollable line: no "…" ellipsis. The width
         // hugs the content (wrap_content) and only caps at maxWidth(160dp); scrolling kicks in
         // only when the text is wider than the view.
@@ -307,6 +346,7 @@ object FloatingCircleManager {
         tvIntent.setHorizontallyScrolling(true)
         tvIntent.scrollTo(0, 0)
         tvIntent.text = text
+        if (text.isBlank()) return
         tvIntent.post {
             // Skip if the task already left the active states before layout ran.
             if (currentState != State.TASK_NOTIFY && currentState != State.RUNNING) return@post
@@ -316,9 +356,13 @@ object FloatingCircleManager {
             val extra = textWidth - available
             if (extra <= 1f) {
                 tvIntent.scrollTo(0, 0)
+                // Short intent: it is already fully readable — start the hide countdown now.
+                scheduleIntentHide(tvIntent, INTENT_HIDE_AFTER_MS)
                 return@post
             }
-            val duration = (extra / INTENT_SCROLL_PX_PER_MS)
+            val density = Resources.getSystem().displayMetrics.density
+            val pxPerMs = (INTENT_SCROLL_DP_PER_MS * density).coerceAtLeast(0.01f)
+            val duration = (extra / pxPerMs)
                 .toLong()
                 .coerceIn(INTENT_MIN_SCROLL_MS, INTENT_MAX_SCROLL_MS)
             val anim = ValueAnimator.ofInt(0, extra.toInt())
@@ -326,9 +370,50 @@ object FloatingCircleManager {
             anim.startDelay = INTENT_SCROLL_START_DELAY_MS
             anim.interpolator = LinearInterpolator()
             anim.addUpdateListener { tvIntent.scrollTo(it.animatedValue as Int, 0) }
+            anim.addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    // Only react to OUR animator; a newer intent may already own the slot.
+                    // Identity check against the field is enough — no cast to ValueAnimator
+                    // needed, and the parent signature (Animator) is what makes `override`
+                    // actually match (using ValueAnimator here would silently define a NEW
+                    // overload and the compiler would flag "overrides nothing").
+                    if (intentScrollAnimator === animation) {
+                        intentScrollAnimator = null
+                        scheduleIntentHide(tvIntent, INTENT_HIDE_AFTER_MS)
+                    }
+                }
+            })
             intentScrollAnimator = anim
             anim.start()
         }
+    }
+
+    /**
+     * After [delayMs] the intent line is cleared and the pill is re-glued to its docked edge,
+     * leaving only "Step N" visible. Cancelled by any new renderStepIntent / setState call.
+     */
+    private fun scheduleIntentHide(tvIntent: TextView, delayMs: Long) {
+        cancelIntentHide()
+        val runnable = Runnable {
+            intentHideRunnable = null
+            if (currentState != State.TASK_NOTIFY && currentState != State.RUNNING) return@Runnable
+            // Do not fight a still-running scroll (shouldn't happen, but be defensive).
+            intentScrollAnimator?.cancel()
+            intentScrollAnimator = null
+            tvIntent.text = ""
+            tvIntent.scrollTo(0, 0)
+            // The pill shrinks once the intent line empties; re-glue so it never floats off-edge.
+            EasyFloat.getFloatView(FLOAT_TAG)?.let { root ->
+                root.post { enforceEdgeDocking(root, resolveSide = false) }
+            }
+        }
+        intentHideRunnable = runnable
+        mainHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun cancelIntentHide() {
+        intentHideRunnable?.let { mainHandler.removeCallbacks(it) }
+        intentHideRunnable = null
     }
 
     /** Task finished (success). No distinct icon — just returns to the resting pill. */
@@ -346,13 +431,46 @@ object FloatingCircleManager {
         ThreadUtils.runOnUiThread { setState(State.STOPPED) }
     }
 
-    /** Task cancelled by user → return to the resting pill. */
-    fun setCancelledState() {
-        ThreadUtils.runOnUiThread { setState(State.CANCELLED) }
+    /**
+     * Visual state between "running" and "cancelled": shown while the confirmed stop is still in
+     * flight, so the pill never claims success before the background loop has actually exited.
+     */
+    fun setCancellingState() {
+        ThreadUtils.runOnUiThread {
+            isCancelling = true
+            // Reuse the active pill (it is the only layout with a text line); the render guard below
+            // replaces its content with "Stopping…" so no ad-hoc text setter is needed.
+            if (currentState == State.TASK_NOTIFY || currentState == State.RUNNING) {
+                renderStepIntent()
+            } else {
+                setState(State.RUNNING)
+            }
+        }
     }
 
+    fun setCancelledState() {
+        ThreadUtils.runOnUiThread {
+            isCancelling = false
+            setState(State.CANCELLED)
+        }
+    }
+
+    /** Label shown on the pill while a stop is being confirmed (reuses the chat "Stopping…" string). */
+    private fun stoppingLabel(): String =
+        appRef?.getString(R.string.chat_stopping) ?: "Stopping…"
+
     private fun setState(state: State) {
+        // Any terminal or idle state ends the "stopping" window; the pill falls back to its normal look.
+        if (state != State.TASK_NOTIFY && state != State.RUNNING) {
+            isCancelling = false
+            // Task is over (success/error/stop/cancel or idle): the reason we hid the pill
+            // (this target app) no longer owns the screen, so restore it for the next task.
+            releaseTaskSuppression()
+        }
         currentState = state
+        // New visual state = new intent lifecycle. Kill any pending hide so a stale runnable
+        // cannot blank a freshly rendered banner/step.
+        cancelIntentHide()
         val view = EasyFloat.getFloatView(FLOAT_TAG)
         XLog.i("FloatingCircle", "setState: $state, view=${view != null}, isShowing=$isShowing")
         view?.let { updateStateView(it, state) }
@@ -388,6 +506,7 @@ object FloatingCircleManager {
         } else {
             intentScrollAnimator?.cancel()
             intentScrollAnimator = null
+            cancelIntentHide()
         }
     }
 
@@ -509,4 +628,106 @@ object FloatingCircleManager {
 
     var onFloatClick: () -> Unit = {}
     var onStopTask: () -> Unit = {}
+
+    private var isCancelling = false
+
+    /**
+     * Temporarily hides the pill from the compositor so a `screencap -p` (or any other
+     * full-framebuffer capture) does not bake the floating status into the image the VLM
+     * sees. Blocks the caller until one frame has actually been rendered with the pill
+     * hidden; safe to call from any thread. No-ops when the pill is not currently shown.
+     *
+     * Only meant for the short capture window (~200-500ms). Callers must not hold the
+     * suppression open across an entire agent round — the user needs to see the pill.
+     */
+    fun <T> withScreenshotSuppression(block: () -> T): T {
+        val view = EasyFloat.getFloatView(FLOAT_TAG)
+        if (view == null) return block()
+        val previousVisibility = view.visibility
+        if (previousVisibility != View.VISIBLE) return block()
+
+        val hidden = CountDownLatch(1)
+        ThreadUtils.runOnUiThread {
+            try {
+                view.visibility = View.INVISIBLE
+                // Wait for one posted frame so SystemUI has composited WITHOUT the pill.
+                view.post { hidden.countDown() }
+            } catch (e: Exception) {
+                hidden.countDown()
+            }
+        }
+        // Do not hang the caller if the UI thread is stuck — 400ms is well past one frame.
+        hidden.await(400, TimeUnit.MILLISECONDS)
+        try {
+            return block()
+        } finally {
+            ThreadUtils.runOnUiThread {
+                // Only restore if no one else re-showed/hid the pill meanwhile.
+                if (view.visibility == View.INVISIBLE) view.visibility = previousVisibility
+            }
+        }
+    }
+
+    /**
+     * Screen-space rectangle occupied by the current floating pill, or null if the pill is
+     * not on-screen. Used by the ADB UI-tree parser to filter ONLY the overlay window's
+     * nodes out of `uiautomator dump --compressed` results on ROMs that leak overlay
+     * windows into the hierarchy.
+     *
+     * Deliberately NOT scoped by package name alone: when the user's task legitimately
+     * targets this app's own Activity (settings page, chat list, batch panel, ...), we
+     * must keep those nodes intact. Only the pill's own rectangle is safe to drop.
+     *
+     * Adds a small inset so anti-aliased borders/strokes of the pill do not accidentally
+     * swallow an underlying target-app node that merely touches the pill's edge.
+     */
+    fun currentOverlayBounds(): Rect? {
+        // Kill the whole overlay-aware pipeline in one place when the feature is off:
+        // no header note, no UI-tree filter, no gesture guard. The rest of the code
+        // treats null as "no pill", so this short-circuit is the ONLY switch we need.
+        if (!KVUtils.isFloatingWindowEnabled()) return null
+        val view = EasyFloat.getFloatView(FLOAT_TAG) ?: return null
+        if (view.visibility != View.VISIBLE) return null
+        val w = view.width
+        val h = view.height
+        if (w <= 0 || h <= 0) return null
+        val loc = IntArray(2)
+        view.getLocationOnScreen(loc)
+        return Rect(loc[0], loc[1], loc[0] + w, loc[1] + h)
+    }
+
+    /** Which edge the pill is currently glued to. Exposed for the get_screen_info header note. */
+    fun isDockedRight(): Boolean = dockedSide == DockSide.RIGHT
+
+    /**
+     * Symptom-driven fallback for apps that refuse touch input while ANY overlay
+     * window exists (banking anti-overlay policies, some ROMs' touch-theft guards).
+     * The agent loop detects "successful tap gestures with zero screen response"
+     * and hides the pill for the rest of the task — no package blacklist needed,
+     * and every overlay-aware guard (header note / tree filter / gesture guard /
+     * screenshot suppression) naturally no-ops because the view is not VISIBLE.
+     */
+    fun suppressForTask(reason: String) {
+        ThreadUtils.runOnUiThread {
+            if (taskSuppressed) return@runOnUiThread
+            taskSuppressed = true
+            XLog.i("FloatingCircle", "Pill auto-hidden for this task: $reason")
+            EasyFloat.hide(FLOAT_TAG)
+        }
+    }
+
+    /** Bring the pill back after the task reaches a terminal state. */
+    fun releaseTaskSuppression() {
+        if (!taskSuppressed) return
+        taskSuppressed = false
+        // Only re-show when the feature is on and the float still exists (hide() dismissed it otherwise).
+        if (KVUtils.isFloatingWindowEnabled() && EasyFloat.getFloatView(FLOAT_TAG) != null) {
+            EasyFloat.show(FLOAT_TAG)
+            isShowing = true
+        }
+        XLog.i("FloatingCircle", "Task suppression released, pill restored")
+    }
+
+    fun isTaskSuppressed(): Boolean = taskSuppressed
+
 }

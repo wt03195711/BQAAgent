@@ -78,6 +78,8 @@ public class TapNodeTool extends BaseTool {
         int y = bounds.centerY();
         String boundsError = validateCoordinates(x, y);
         if (boundsError != null) return ToolResult.error(boundsError);
+        String overlayMsg = driver.overlayBlockedMessage(x, y, "tap_node " + nodeId);
+        if (overlayMsg != null) return ToolResult.error(overlayMsg);
         boolean success = driver.performTap(x, y);
         return success ? ToolResult.success("Tapped node " + nodeId + " at (" + x + ", " + y + ")")
                 : ToolResult.error("Failed to tap node " + nodeId + " at (" + x + ", " + y + ")");

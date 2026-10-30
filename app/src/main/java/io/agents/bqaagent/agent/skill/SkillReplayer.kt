@@ -45,6 +45,9 @@ class SkillReplayer(
 
         val totalSteps = template.steps.size
         val startTime = System.currentTimeMillis()
+        // Verification never blocks a step, but the run must report it: accumulated here and
+        // surfaced through ReplayResult.warnings (a val so the loop's early returns can read it).
+        val warnings = mutableListOf<String>()
         val estimatedTotalMs = template.steps.sumOf { step ->
             val launchExtra = if (step.toolName in LAUNCH_TOOLS) LAUNCH_STEP_EXTRA_MS else 0L
             step.elapsedMs + STEP_TIMEOUT_BASE_MS + launchExtra
@@ -67,7 +70,12 @@ class SkillReplayer(
             val elapsed = System.currentTimeMillis() - startTime
             if (elapsed > timeoutMs) {
                 XLog.w(TAG, "Replay timeout at step ${index + 1}")
-                return ReplayResult(false, stepsCompleted, message = "Replay timeout after ${elapsed}ms")
+                return ReplayResult(
+                    false,
+                    stepsCompleted,
+                    message = "Replay timeout after ${elapsed}ms",
+                    warnings = warnings.toList()
+                )
             }
 
             if (step.sensitive && sensitiveGate != null) {
@@ -99,7 +107,7 @@ class SkillReplayer(
 
             // Pre-action baseline for settle detection: settle must observe the
             // screen actually changing relative to this before declaring it ready.
-            val baseline = ScreenSettleWaiter.captureBaseline()
+            val baseline = ScreenSettleWaiter.captureBaseline(reuseFreshCache = settledMapUsable)
 
             val resolved: Pair<String, Map<String, Any>> = when {
                 sub != null && sub.kind == SubstitutionKind.SELECTION -> {
@@ -121,7 +129,8 @@ class SkillReplayer(
                         return ReplayResult(
                             success = false,
                             stepsUsed = stepsCompleted,
-                            message = "Substituted target \"${sub.newValue}\" not found at step ${index + 1}"
+                            message = "Substituted target \"${sub.newValue}\" not found at step ${index + 1}",
+                            warnings = warnings.toList()
                         )
                     }
                     XLog.i(TAG, "SELECTION substitution at step ${index + 1}: \"${sub.oldValue}\" -> \"${sub.newValue}\" (node=${node.nodeId})")
@@ -153,7 +162,8 @@ class SkillReplayer(
                 return ReplayResult(
                     success = false,
                     stepsUsed = stepsCompleted,
-                    message = "Failed at step ${index + 1} (${step.toolName}): ${result.error}"
+                    message = "Failed at step ${index + 1} (${step.toolName}): ${result.error}",
+                    warnings = warnings.toList()
                 )
             }
             if (isCancelled()) {
@@ -172,18 +182,22 @@ class SkillReplayer(
             // Settle left a fresh node map describing this exact screen; the next step's
             // resolve may reuse it without dumping again.
             settledMapUsable = true
-            // Verification is the readiness criterion: poll within budget until the
-            // recorded expectations (package/activity/anchor texts) hold, instead of
-            // failing instantly on a screen that is stable but still loading.
+            // Verification is the readiness criterion: poll within budget until the recorded
+            // expectations hold, instead of failing instantly on a screen that is stable but
+            // still loading. First attempt reads the node map settle just produced; retries
+            // must force a fresh dump, since invalidateScreenCache only drops the render cache.
             val verifyDeadline = System.currentTimeMillis() + REPLAY_VERIFY_BUDGET_MS
-            var verifyResult = ReplayVerifier.verifyStep(step, substitutedOldValues)
+            val nextStepSubstitution = substitutionsByStep[step.stepIndex + 1]?.let { it.oldValue to it.newValue }
+            var forceNodeRefresh = false
+            var verifyResult = ReplayVerifier.verifyStep(step, substitutedOldValues, forceNodeRefresh, nextStepSubstitution)
             while (verifyResult is ReplayVerifier.VerifyResult.Fail &&
                 !isCancelled() && System.currentTimeMillis() < verifyDeadline
             ) {
                 XLog.d(TAG, "Step ${index + 1} not verified yet (${verifyResult.reason}), polling (${verifyDeadline - System.currentTimeMillis()}ms budget left)")
                 Thread.sleep(REPLAY_POLL_INTERVAL_MS)
                 LocalAdbDeviceDriver.invalidateScreenCache()
-                verifyResult = ReplayVerifier.verifyStep(step, substitutedOldValues)
+                forceNodeRefresh = true
+                verifyResult = ReplayVerifier.verifyStep(step, substitutedOldValues, forceNodeRefresh, nextStepSubstitution)
             }
             val stepDuration = System.currentTimeMillis() - stepStartTime
             when (verifyResult) {
@@ -192,9 +206,24 @@ class SkillReplayer(
                     onStepResult?.invoke(index + 1, totalSteps, stepLabel(step), true, "Done", stepDuration, formatParamsForDisplay(resolved.second))
                 }
                 is ReplayVerifier.VerifyResult.Warning -> {
-                    XLog.w(TAG, "Step ${index + 1} verification warning: ${verifyResult.reason}")
-                    onStepResult?.invoke(index + 1, totalSteps, stepLabel(step), true, "Warning: ${verifyResult.reason}", stepDuration, formatParamsForDisplay(resolved.second))
-                    if (verifyResult.reason.startsWith("System dialog")) {
+                    val warning = verifyResult.reason
+                    if (step.sensitive && verifyResult.escalateOnSensitive) {
+                        // A risky step never advances on merely plausible evidence: an
+                        // uncorroborated payment/submit step is a hard stop, not a note.
+                        XLog.w(TAG, "Step ${index + 1} is sensitive and verification is uncertain: $warning")
+                        SkillGovernor.recordVerificationFailure(template, index, step.toolName)
+                        onStepResult?.invoke(index + 1, totalSteps, stepLabel(step), false, "Uncertain at sensitive step: $warning", stepDuration, formatParamsForDisplay(resolved.second))
+                        return ReplayResult(
+                            success = false,
+                            stepsUsed = stepsCompleted,
+                            message = "Verification uncertain at sensitive step ${index + 1}: $warning",
+                            warnings = warnings.toList()
+                        )
+                    }
+                    warnings += "Step ${index + 1} (${stepLabel(step)}): $warning"
+                    XLog.w(TAG, "Step ${index + 1} verification warning: $warning")
+                    onStepResult?.invoke(index + 1, totalSteps, stepLabel(step), true, "Warning: $warning", stepDuration, formatParamsForDisplay(resolved.second))
+                    if (warning.startsWith("System dialog")) {
                         ReplayVerifier.autoDismissSystemDialog()
                         Thread.sleep(500)
                         // The dialog dismissal changed the screen; the settled map is stale.
@@ -203,12 +232,15 @@ class SkillReplayer(
                 }
                 is ReplayVerifier.VerifyResult.Fail -> {
                     XLog.w(TAG, "Step ${index + 1} verification failed: ${verifyResult.reason}")
-                    SkillGovernor.recordTemplateFailure(template, index, step.toolName)
+                    // Counted apart from a tool failure: verification is evidence-based and screen
+                    // content legitimately changes, so it must not circuit-break as aggressively.
+                    SkillGovernor.recordVerificationFailure(template, index, step.toolName)
                     onStepResult?.invoke(index + 1, totalSteps, stepLabel(step), false, verifyResult.reason, stepDuration, formatParamsForDisplay(resolved.second))
                     return ReplayResult(
                         success = false,
                         stepsUsed = stepsCompleted,
-                        message = "Verification failed at step ${index + 1}: ${verifyResult.reason}"
+                        message = "Verification failed at step ${index + 1}: ${verifyResult.reason}",
+                        warnings = warnings.toList()
                     )
                 }
             }
@@ -220,10 +252,14 @@ class SkillReplayer(
         SkillGovernor.recordTemplateSuccess(template)
         val totalElapsed = System.currentTimeMillis() - startTime
         XLog.i(TAG, "Replay completed: $stepsCompleted steps in ${totalElapsed}ms")
+        if (warnings.isNotEmpty()) {
+            XLog.i(TAG, "Replay finished with ${warnings.size} verification warning(s)")
+        }
         return ReplayResult(
             success = true,
             stepsUsed = stepsCompleted,
-            message = "Replayed ${template.steps.size} steps successfully in ${totalElapsed}ms"
+            message = "Replayed ${template.steps.size} steps successfully in ${totalElapsed}ms",
+            warnings = warnings.toList()
         )
     }
 

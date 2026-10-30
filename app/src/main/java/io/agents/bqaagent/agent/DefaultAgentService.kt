@@ -19,6 +19,7 @@ import io.agents.bqaagent.agent.llm.LlmResponse
 import io.agents.bqaagent.agent.llm.StreamingListener
 import io.agents.bqaagent.adb.LocalAdbAutomation
 import io.agents.bqaagent.adb.LocalAdbDeviceDriver
+import io.agents.bqaagent.floating.FloatingCircleManager
 import io.agents.bqaagent.tool.ToolRegistry
 import io.agents.bqaagent.tool.impl.GetScreenInfoTool
 import io.agents.bqaagent.tool.ToolResult
@@ -96,10 +97,13 @@ class DefaultAgentService : AgentService {
             "clipboard", "send_file", "send_message", "make_call", "repeat_actions", "secure_keypad_input", "wait"
         )
         private val SKIP_AUTO_SCREEN_AFTER_ACTION = setOf("scroll_to_find")
+
+        // Only direct touch gestures count toward "inert tap" detection. Scroll-family
+        // gestures legitimately produce identical screens at list ends, and read-only
+        // tools changing nothing is expected — those would false-positive here.
+        private val TOUCH_GESTURE_TOOLS = setOf("tap", "tap_node", "long_press")
         /** ms to wait for UI to settle before capturing screen after an action */
         private const val SCREEN_SETTLE_MS = 2000L
-        /** Extract quoted labels from screen tree output; both compact and text modes wrap labels in double quotes */
-        private val ANCHOR_QUOTED_LABEL_REGEX = Regex("\"([^\"]{2,60})\"")
         private const val UNUSABLE_SCREEN_PREFIX = "SCREEN_TREE_UNUSABLE"
         private const val DUMP_ONLY_HARD_TOKEN_LIMIT = 180_000
         private const val BROWSER_HARD_TOKEN_LIMIT = 220_000
@@ -363,6 +367,20 @@ for a high-risk action, and never re-attempt a rejected action.
     private val cancelled = AtomicBoolean(false)
     private var taskFuture: java.util.concurrent.Future<*>? = null
 
+    /**
+     * Session liveness probe installed by the caller of executeTask. Volatile so the loop thread sees
+     * the swap immediately; the default keeps standalone callers (chat LLM, tests) behaviour-neutral.
+     */
+    @Volatile
+    private var stopProbe: () -> Boolean = { false }
+
+    /**
+     * Single stop predicate used at EVERY interruption point: either an explicit cancel() or the
+     * session having gone away. Both are required — cancelled alone loses a race against the flag
+     * reset in executeTask, and the probe alone cannot cover a same-session budget stop.
+     */
+    private fun stopped(): Boolean = cancelled.get() || stopProbe()
+
     override fun initialize(config: AgentConfig) {
         this.config = config
         this.llmClient = LlmClientFactory.create(config)
@@ -396,8 +414,20 @@ for a high-risk action, and never re-attempt a rejected action.
             return
         }
 
+        // Install the probe BEFORE touching the flag, then seed `cancelled` from the SESSION FACT
+        // only. Do NOT fold in the old `cancelled` value via stopped(): a previous task's cancel
+        // leaves it TRUE, and seeding from it would declare every subsequent task pre-cancelled —
+        // the loop never starts, no callback fires, and the already-acquired session dead-locks.
+        // A cancel arriving mid-submit is still caught, because requestStop() flips the session to
+        // STOPPING before agentService.cancel() is ever called — the probe sees that fact directly.
+        stopProbe = { callback.isSessionCancelled() }
         running.set(true)
-        cancelled.set(false)
+        cancelled.set(stopProbe())
+        if (cancelled.get()) {
+            XLog.i(TAG, "executeTask: session already cancelled before submit; not starting loop")
+            running.set(false)
+            return
+        }
         var terminalCallback: (() -> Unit)? = null
 
         val callbackProxy = object : AgentCallback {
@@ -436,12 +466,19 @@ for a high-risk action, and never re-attempt a rejected action.
             }
         }
 
-        taskFuture = executor?.submit {
+        taskFuture = (executor?.takeIf { !it.isTerminated }
+        // Escalated shutdown() terminates the single-thread pool for good; a later task must be
+        // able to run on a fresh one instead of dying on RejectedExecutionException.
+            ?: Executors.newSingleThreadExecutor().also { executor = it }).submit {
+            // The previous cancelled task may have died inside a socket read with the interrupt
+            // flag still set; a pooled thread carrying it would fail EVERY blocking call of this
+            // task instantly (Kadb.create, shell reads) and look like a dead ADB connection.
+            Thread.interrupted()
             try {
                 runAgentLoop(userPrompt, callbackProxy)
             } catch (e: Exception) {
                 if (terminalCallback == null) {
-                    if (cancelled.get()) {
+                    if (stopped()) {
                         XLog.i(TAG, "Agent task cancelled (interrupted)")
                     } else {
                         XLog.e(TAG, "Agent execution error", e)
@@ -460,14 +497,19 @@ for a high-risk action, and never re-attempt a rejected action.
                     }
                 }
                 running.set(false)
-                val terminal = if (cancelled.get()) {
+                val terminal = if (stopped()) {
                     XLog.i(TAG, "Suppressing terminal callback after cancellation")
                     null
                 } else {
                     terminalCallback
                 }
                 terminalCallback = null
+                stopProbe = { false }
+                taskFuture = null
                 terminal?.invoke()
+                // Unconditional: the orchestrator re-publishes `busy` on this. Cancellation swallows
+                // every other callback here, which used to leave the busy gate stuck open forever.
+                runCatching { callback.onEngineSettled() }
             }
         }
     }
@@ -553,7 +595,7 @@ for a high-risk action, and never re-attempt a rejected action.
     ): LlmResponse {
         var lastException: Exception? = null
         for (attempt in 0 until MAX_API_RETRIES) {
-            if (cancelled.get()) throw RuntimeException(ClawApplication.instance.getString(R.string.agent_task_cancelled))
+            if (stopped()) throw RuntimeException(ClawApplication.instance.getString(R.string.agent_task_cancelled))
             try {
                 return if (config.streaming) {
                     val textBuilder = StringBuilder()
@@ -570,7 +612,7 @@ for a high-risk action, and never re-attempt a rejected action.
                 }
             } catch (e: Exception) {
                 lastException = e
-                if (cancelled.get()) {
+                if (stopped()) {
                     XLog.i(TAG, "LLM call stopped after cancellation: ${e.message ?: e.javaClass.simpleName}")
                     throw e
                 }
@@ -875,6 +917,13 @@ for a high-risk action, and never re-attempt a rejected action.
         val loopHistory = LinkedList<RoundFingerprint>()
         var lastScreenHash = 0
         var previousScreenTexts: Set<String> = emptySet()
+        // === Inert-touch (overlay-hostile app) detection state ===
+        // Screen-text fingerprint with the volatile header lines stripped, so
+        // "nothing changed" really means nothing changed (snapshot ids and the
+        // overlay_note itself always differ between dumps).
+        var previousContentSignature = 0
+        var consecutiveInertTouches = 0
+        var overlaySuppressedThisTask = false
         val tokenMonitor = TokenMonitor(config.modelName)
         val stuckDetector = StuckDetector()
         val taskBudget = TaskBudget.fromSettings()
@@ -894,7 +943,7 @@ for a high-risk action, and never re-attempt a rejected action.
         val traceTurnId = LlmTraceContext.newTurnId("agent", rawUserRequest)
         val tracePromptHash = LlmTraceContext.promptHash(rawUserRequest)
 
-        while (iterations < maxIterations && !cancelled.get()) {
+        while (iterations < maxIterations && !stopped()) {
             iterations++
             callback.onLoopStart(iterations)
             iterationsSinceLastVlm++
@@ -938,7 +987,7 @@ for a high-risk action, and never re-attempt a rejected action.
                     LlmTraceContext.clear()
                 }
             } catch (e: Exception) {
-                if (cancelled.get()) {
+                if (stopped()) {
                     callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
                     return
                 }
@@ -947,7 +996,7 @@ for a high-risk action, and never re-attempt a rejected action.
                 return
             }
 
-            if (cancelled.get()) {
+            if (stopped()) {
                 callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
                 return
             }
@@ -1124,7 +1173,7 @@ for a high-risk action, and never re-attempt a rejected action.
 
             // Execute tool calls
             for (toolRequest in llmResponse.toolExecutionRequests) {
-                if (cancelled.get()) {
+                if (stopped()) {
                     callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
                     return
                 }
@@ -1185,7 +1234,7 @@ for a high-risk action, and never re-attempt a rejected action.
                     XLog.i(TAG, "Sensitive confirm gate raised by model: $actionSummary ($riskType)")
                     callback.onToolCall(iterations, toolName, actionSummary, toolArgs)
                     val approved = callback.onSensitiveConfirm(iterations, actionSummary, riskType, SENSITIVE_CONFIRM_TIMEOUT_MS)
-                    if (cancelled.get()) {
+                    if (stopped()) {
                         callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
                         return
                     }
@@ -1216,7 +1265,7 @@ for a high-risk action, and never re-attempt a rejected action.
                     val hardRiskType = sensitiveHardGateRiskType(toolName)
                     XLog.i(TAG, "Hard sensitive gate for $toolName: $hardSummary")
                     val hardApproved = callback.onSensitiveConfirm(iterations, hardSummary, hardRiskType, SENSITIVE_CONFIRM_TIMEOUT_MS)
-                    if (cancelled.get()) {
+                    if (stopped()) {
                         callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
                         return
                     }
@@ -1294,9 +1343,22 @@ for a high-risk action, and never re-attempt a rejected action.
                 // Capture coordinate-based target text BEFORE execution: Opt-3 rebuilds
                 // nodeIdMap for the post-action screen, so a post-execution reverse
                 // lookup would resolve (x,y) against the wrong screen's nodes.
-                val preTargetText = if (SkillRecorder.isRecordingActive()) {
-                    SkillRecorder.captureTargetText(toolName, params, nodeLocatorSnapshot)
+                val preTargetCapture = if (SkillRecorder.isRecordingActive()) {
+                    SkillRecorder.captureTargetTextInfo(toolName, params, nodeLocatorSnapshot)
                 } else null
+                // Verification T2 back-fill. The node map right now still describes the screen
+                // the PREVIOUS recorded step produced, and this round's target is the element
+                // that screen must expose. Attaching it here is free (the same data the step
+                // itself records) and must happen pre-execution, exactly like the captures above.
+                if (preTargetCapture != null) {
+                    SkillRecorder.attachNextStepExpectation(
+                        toolName = toolName,
+                        locator = nodeLocatorSnapshot,
+                        targetText = preTargetCapture.text,
+                        targetTextSource = preTargetCapture.reason
+                    )
+                }
+                val preTargetText = preTargetCapture?.text
                 val result = if (
                     toolName == "get_screen_info" &&
                     !screenChangedSincePrewarm &&
@@ -1506,6 +1568,47 @@ for a high-risk action, and never re-attempt a rejected action.
                             val added = currentTexts - previousScreenTexts
                             val removed = previousScreenTexts - currentTexts
                             previousScreenTexts = currentTexts
+
+                            // === Inert-touch fallback ===
+                            // Banking-style apps that reject ALL touch input while any
+                            // overlay window exists show up here as: gesture reported
+                            // success by ADB, yet the visible screen text does not change
+                            // at all, round after round. Rather than burning the loop
+                            // budget, hide our pill once and tell the LLM why — every
+                            // overlay guard downstream then no-ops automatically.
+                            if (result.isSuccess && toolName in TOUCH_GESTURE_TOOLS && !overlaySuppressedThisTask && FloatingCircleManager.isShowing()) {
+                                val contentSignature = currentTexts
+                                    .filterNot {
+                                        it.startsWith("snapshot=") ||
+                                                it.startsWith("overlay_note:") ||
+                                                it.startsWith("scroll_area:")
+                                    }
+                                    .sorted()
+                                    .joinToString("\n")
+                                    .hashCode()
+                                if (contentSignature == previousContentSignature) {
+                                    consecutiveInertTouches++
+                                } else {
+                                    consecutiveInertTouches = 0
+                                }
+                                previousContentSignature = contentSignature
+                                if (consecutiveInertTouches >= 2) {
+                                    overlaySuppressedThisTask = true
+                                    consecutiveInertTouches = 0
+                                    FloatingCircleManager.suppressForTask("taps produced no screen response")
+                                    postToolNotice =
+                                        "[System Notice] Your last touch actions had no visible effect. " +
+                                                "The target app may reject touch input while a system overlay window is present. " +
+                                                "The agent's floating status pill has been AUTO-HIDDEN for the remainder of this task " +
+                                                "(it returns automatically when the task ends) — this is expected and not a malfunction. " +
+                                                "Continue the task normally now; if touches still produce no response, the app blocks " +
+                                                "automation for another reason and you should call finish with a clear explanation."
+                                }
+                            } else if (toolName in TOUCH_GESTURE_TOOLS) {
+                                // Pill already hidden or suppression done: keep the counter honest.
+                                consecutiveInertTouches = 0
+                            }
+                            previousScreenTexts = currentTexts
                             val diffSection = buildString {
                                 if (added.isNotEmpty()) append("\nNew on screen: ${added.take(10).joinToString(", ")}")
                                 if (removed.isNotEmpty()) append("\nGone from screen: ${removed.take(10).joinToString(", ")}")
@@ -1547,34 +1650,18 @@ for a high-risk action, and never re-attempt a rejected action.
                         var pkgAfter = ""
                         var actAfter = ""
                         try {
-                            pkgAfter = LocalAdbDeviceDriver.foregroundPackageName()
-                            actAfter = LocalAdbDeviceDriver.activeActivityName()
+                            val (pkg, act) = LocalAdbDeviceDriver.foregroundPackageAndActivity()
+                            pkgAfter = pkg
+                            actAfter = act
                         } catch (_: Exception) {}
-                        // Anchors MUST be extracted from the same rendering used at replay
-                        // time. ReplayVerifier.verifyAnchorTexts() re-renders with mode="text"
-                        // and substring-matches, so record-side anchors also come from a fixed
-                        // text-mode render. This keeps record/replay symmetric regardless of the
-                        // agent-loop mode (compact for LOCAL, actionable/full for cloud) and keeps
-                        // skill templates provider-neutral. It is a ScreenTreeCache hit right after
-                        // the post-action dump, so it adds no extra uiautomator dump.
-                        val anchorSource = if (SkillRecorder.isRecordingActive()) {
-                            val textRender = try {
-                                LocalAdbDeviceDriver.getScreenTree("text")
-                            } catch (_: Exception) {
-                                null
-                            }
-                            textRender ?: if (toolName in ACTION_TOOLS) {
-                                try {
-                                    val parsed = GSON.fromJson(combinedResultData, ToolResult::class.java)
-                                    parsed?.data ?: result.data
-                                } catch (_: Exception) { result.data }
-                            } else {
-                                result.data
-                            }
-                        } else {
-                            null
-                        }
-                        val anchorTexts = extractAnchorTexts(anchorSource)
+                        // Deleted:（此处整段 anchor 注释 + val anchorSource = if (SkillRecorder.isRecordingActive()) { ... } else { null } 块全部删除）
+                        // Deleted:val anchorTexts = extractAnchorTexts(anchorSource)
+                        // T3 structural evidence: read from the post-action node map, keyed by
+                        // resource-id / content-description instead of visible text, so it is
+                        // immune to the content changes that made anchors unreliable.
+                        val stableKeys = if (SkillRecorder.isRecordingActive()) {
+                            SkillRecorder.captureStableKeys()
+                        } else null
                         SkillRecorder.recordStep(
                             toolName = toolName,
                             displayName = displayName,
@@ -1582,12 +1669,12 @@ for a high-risk action, and never re-attempt a rejected action.
                             elapsedMs = toolElapsedMs,
                             expectedPackageAfter = pkgAfter,
                             expectedActivityAfter = actAfter,
-                            anchorTexts = anchorTexts,
                             nodeLocator = nodeLocatorSnapshot,
                             intent = stepIntent,
                             precomputedTargetText = preTargetText,
                             sensitive = pendingSensitiveMark != null && SkillRecorder.isRecordableTool(toolName),
-                            confirmSummary = pendingSensitiveMark.orEmpty()
+                            confirmSummary = pendingSensitiveMark.orEmpty(),
+                            stableKeys = stableKeys
                         )
                     }
                 } catch (e: Exception) {
@@ -1649,7 +1736,7 @@ for a high-risk action, and never re-attempt a rejected action.
             XLog.d(TAG, "Round:$iterations total=$totalTokens thisRound=${llmResponse.tokenUsage?.totalTokenCount()}")
         }
 
-        if (cancelled.get()) {
+        if (stopped()) {
             callback.onComplete(iterations, ClawApplication.instance.getString(R.string.agent_task_cancel), totalTokens, actualModelName, TaskStatus.CANCELLED, TaskReasonCode.USER_CANCEL)
         } else {
             callback.onComplete(
@@ -1663,21 +1750,13 @@ for a high-risk action, and never re-attempt a rejected action.
         }
     }
 
-    private fun extractAnchorTexts(screenData: String?): List<String> {
-        if (screenData.isNullOrBlank()) return emptyList()
-        return ANCHOR_QUOTED_LABEL_REGEX.findAll(screenData)
-            .map { it.groupValues[1].trim().removeSuffix("..").trim() }
-            .filter { it.length >= 2 && !it.startsWith("SCREEN_TREE_UNUSABLE") }
-            .distinct()
-            .take(3)
-            .toList()
-    }
-
     override fun cancel() {
         cancelled.set(true)
         if (config.provider == LlmProvider.LOCAL) {
             // LiteRT native sendMessage is not interrupt-safe; let the current round yield
             // naturally, then surface Task cancelled after the client closes cleanly.
+            // The session probe already blocks every subsequent tool dispatch, so the device is
+            // never touched again even while the native round is still draining.
             XLog.i(TAG, "cancel: LOCAL task marked cancelled; waiting for current LiteRT round to finish safely")
             return
         }
@@ -1695,8 +1774,11 @@ for a high-risk action, and never re-attempt a rejected action.
 
     override fun shutdown() {
         cancel()
+        taskFuture?.cancel(true)
         executor?.shutdownNow()
-        if (::llmClient.isInitialized) {
+        // LOCAL: never close the client while a native round may still be executing (cancel() already
+        // documents it as not interrupt-safe). The loop's own finally closes it once the round drains.
+        if (config.provider != LlmProvider.LOCAL && ::llmClient.isInitialized) {
             try {
                 llmClient.close()
                 XLog.i(TAG, "LlmClient closed on shutdown")

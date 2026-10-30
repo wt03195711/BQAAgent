@@ -55,6 +55,10 @@ public class LongPressTool extends BaseTool {
         int y = requireInt(params, "y");
         String boundsError = validateCoordinates(x, y);
         if (boundsError != null) return ToolResult.error(boundsError);
+        // Same overlay pre-flight as tap: the underlying gesture is a swipe and the
+        // pill will happily interpret it as its own drag.
+        String overlayMsg = driver.overlayBlockedMessage(x, y, "long_press");
+        if (overlayMsg != null) return ToolResult.error(overlayMsg);
         long duration = optionalLong(params, "duration_ms", 1000);
         boolean success = driver.performLongPress(x, y, duration);
         return success ? ToolResult.success("Long pressed at (" + x + ", " + y + ") for " + duration + "ms")

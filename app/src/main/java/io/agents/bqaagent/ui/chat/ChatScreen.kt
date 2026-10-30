@@ -131,6 +131,8 @@ fun ChatScreen(
     permissionBannerText: String? = null,
     isAwaitingReply: Boolean,
     isTaskRunning: Boolean,
+    isTaskStopping: Boolean = false,
+    otherModeBusy: Boolean = false,
     isDownloading: Boolean = false,
     downloadProgress: Int = 0,
     isLocalModel: Boolean = true,
@@ -187,6 +189,9 @@ fun ChatScreen(
     }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    // One gate for every mode-switch escape hatch: the top-bar batch button, the system back
+    // button, the edge-swipe back gesture, and conversation switching inside the drawer.
+    val modeSwitchLocked = isTaskRunning || isTaskStopping || otherModeBusy
     // Shared state for prompt chip → input bar prefill
     var prefillText by remember { mutableStateOf("") }
     var prefillIsTask by remember { mutableStateOf(false) }
@@ -254,6 +259,8 @@ fun ChatScreen(
                         onMenuClick = { scope.launch { drawerState.open() } },
                         onSettings = onOpenSettings,
                         onOpenBatch = onOpenBatch,
+                        // A chat task owns the engine: switching must not allow a second mode to start.
+                        batchEnabled = !modeSwitchLocked,
                         colors = colors,
                     )
                     if (activeTasks.isNotEmpty()) {
@@ -296,6 +303,8 @@ fun ChatScreen(
                         ChatInputBar(
                             isAwaitingReply = isAwaitingReply,
                             isTaskRunning = isTaskRunning,
+                            isTaskStopping = isTaskStopping,
+                            otherModeBusy = otherModeBusy,
                             inputEnabled = inputEnabled,
                             isTaskMode = isTaskMode,
                             usesExplicitInputModes = usesExplicitInputModes,
@@ -565,6 +574,7 @@ private fun ChatTopBar(
     onMenuClick: () -> Unit,
     onSettings: () -> Unit,
     onOpenBatch: () -> Unit,
+    batchEnabled: Boolean = true,
     colors: PokeclawColors,
 ) {
     Column {
@@ -588,15 +598,22 @@ private fun ChatTopBar(
                 }
             },
             actions = {
-                TextButton(onClick = onOpenBatch) {
+                TextButton(
+                    onClick = onOpenBatch,
+                    enabled = batchEnabled,
+                ) {
                     Icon(
                         Icons.Default.PlaylistPlay,
                         contentDescription = null,
-                        tint = colors.textSecondary,
+                        tint = if (batchEnabled) colors.textSecondary else colors.textTertiary.copy(alpha = 0.4f),
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(Modifier.width(4.dp))
-                    Text(stringResource(R.string.chat_tab_batch), fontSize = 13.sp, color = colors.textSecondary)
+                    Text(
+                        stringResource(R.string.chat_tab_batch),
+                        fontSize = 13.sp,
+                        color = if (batchEnabled) colors.textSecondary else colors.textTertiary.copy(alpha = 0.4f),
+                    )
                 }
                 IconButton(onClick = onSettings) {
                     Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.cd_settings))
@@ -1079,121 +1096,6 @@ private fun MessageList(
     }
 }
 
-// ======================== BUBBLES ========================
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun CopyableMessageContainer(
-    text: String,
-    colors: PokeclawColors,
-    modifier: Modifier = Modifier,
-    content: @Composable (Modifier) -> Unit,
-) {
-    val context = LocalContext.current
-    var menuExpanded by remember { mutableStateOf(false) }
-    var showSelectableText by remember { mutableStateOf(false) }
-    val copyable = text.isNotBlank() && text != "..."
-
-    Box(modifier = modifier) {
-        content(
-            if (copyable) {
-                Modifier.combinedClickable(
-                    onClick = {},
-                    onLongClick = { menuExpanded = true },
-                )
-            } else {
-                Modifier
-            }
-        )
-
-        DropdownMenu(
-            expanded = menuExpanded,
-            onDismissRequest = { menuExpanded = false },
-            containerColor = colors.surface,
-        ) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.chat_action_copy), color = colors.textPrimary) },
-                leadingIcon = {
-                    Icon(Icons.Default.ContentCopy, contentDescription = null, tint = colors.textSecondary)
-                },
-                onClick = {
-                    menuExpanded = false
-                    copyTextToClipboard(context, text)
-                },
-            )
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.chat_select_text), color = colors.textPrimary) },
-                leadingIcon = {
-                    Icon(Icons.Default.Edit, contentDescription = null, tint = colors.textSecondary)
-                },
-                onClick = {
-                    menuExpanded = false
-                    showSelectableText = true
-                },
-            )
-        }
-    }
-
-    if (showSelectableText) {
-        SelectableMessageDialog(
-            text = text,
-            colors = colors,
-            onCopyAll = { copyTextToClipboard(context, text) },
-            onDismiss = { showSelectableText = false },
-        )
-    }
-}
-
-@Composable
-private fun SelectableMessageDialog(
-    text: String,
-    colors: PokeclawColors,
-    onCopyAll: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = colors.surface,
-        title = {
-            Text(stringResource(R.string.chat_select_text), color = colors.textPrimary)
-        },
-        text = {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 420.dp)
-                    .verticalScroll(rememberScrollState())
-                    .background(colors.background, StraightControlShape)
-                    .padding(12.dp),
-            ) {
-                SelectionContainer {
-                    Text(
-                        text = text,
-                        color = colors.textPrimary,
-                        fontSize = 15.sp,
-                        lineHeight = 21.sp,
-                    )
-                }
-            }
-        },
-        dismissButton = {
-            TextButton(
-                onClick = {
-                    onCopyAll()
-                    onDismiss()
-                },
-            ) {
-                Text(stringResource(R.string.chat_copy_all), color = colors.textSecondary)
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.chat_done), color = colors.accent)
-            }
-        },
-    )
-}
-
 @Composable
 private fun UserImageUploadCard(
     onUpload: () -> Unit,
@@ -1264,12 +1166,6 @@ private fun UserImageUploadCard(
             }
         }
     }
-}
-
-private fun copyTextToClipboard(context: Context, text: String) {
-    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    clipboard.setPrimaryClip(ClipData.newPlainText("BQAAgent message", text))
-    Toast.makeText(context, context.getString(R.string.chat_copied), Toast.LENGTH_SHORT).show()
 }
 
 @Composable
@@ -1519,9 +1415,17 @@ private fun ToolGroup(message: ChatMessage, colors: PokeclawColors) {
     var expanded by remember(message.timestamp) { mutableStateOf(false) }
     val completedCount = steps.count { it.completedAt != null }
     val tokenTotal = steps.mapNotNull { it.tokenCount }.sum()
+    // Same title mapping as batch's DetailToolGroup: "Replay steps" is a sentinel written by
+    // TaskFlowController, rendered localized instead of raw.
+    val groupTitle = message.groupTitle
+    val title = when {
+        groupTitle.isNullOrBlank() -> stringResource(R.string.chat_execution_steps)
+        groupTitle == "Replay steps" -> stringResource(R.string.batch_replay_steps)
+        else -> groupTitle
+    }
     val headerMeta = buildString {
         append("$completedCount/${steps.size}")
-        if (tokenTotal > 0) append(" · ${formatStepTokens(tokenTotal)} tokens")
+        if (tokenTotal > 0) append(" · " + stringResource(R.string.batch_step_tokens, formatStepTokens(tokenTotal)))
     }
 
     Surface(
@@ -1548,7 +1452,7 @@ private fun ToolGroup(message: ChatMessage, colors: PokeclawColors) {
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    message.groupTitle ?: stringResource(R.string.chat_execution_steps),
+                    title,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = colors.textSecondary,
@@ -1587,8 +1491,8 @@ private fun StepTimelineRow(step: ToolStep, isLast: Boolean, colors: PokeclawCol
         step.success -> colors.accent
         else -> Color(0xFFF87171)
     }
-    val durationText = step.durationMs?.let { formatStepDuration(it) } ?: "running"
-    val tokenText = step.tokenText?.let { " · $it tokens" }.orEmpty()
+    val durationText = step.durationMs?.let { formatStepDuration(it) } ?: stringResource(R.string.batch_step_running)
+    val tokenText = step.tokenText?.let { " · " + stringResource(R.string.batch_step_tokens, it) }.orEmpty()
     val costText = step.costText?.let { " · $it" }.orEmpty()
 
     Row(modifier = Modifier.fillMaxWidth()) {
@@ -1630,7 +1534,7 @@ private fun StepTimelineRow(step: ToolStep, isLast: Boolean, colors: PokeclawCol
             }
             Spacer(Modifier.height(2.dp))
             Text(
-                "Duration $durationText$tokenText$costText",
+                stringResource(R.string.batch_step_duration, durationText) + tokenText + costText,
                 fontSize = 10.sp,
                 color = colors.textTertiary,
                 maxLines = 1,
@@ -1638,7 +1542,7 @@ private fun StepTimelineRow(step: ToolStep, isLast: Boolean, colors: PokeclawCol
             )
             if (BuildConfig.DEBUG && !step.params.isNullOrBlank()) {
                 Text(
-                    "Params: ${step.params}",
+                    stringResource(R.string.batch_step_params, step.params),
                     fontSize = 10.sp,
                     color = colors.textTertiary,
                     maxLines = 2,
@@ -1646,18 +1550,24 @@ private fun StepTimelineRow(step: ToolStep, isLast: Boolean, colors: PokeclawCol
                 )
             }
             if (step.summary.isNotBlank()) {
-                Text(
-                    step.summary,
-                    fontSize = 11.sp,
-                    color = colors.textTertiary,
-                )
+                CopyableMessageContainer(text = step.summary, colors = colors) { longPressModifier ->
+                    Text(
+                        step.summary,
+                        fontSize = 11.sp,
+                        color = colors.textTertiary,
+                        modifier = longPressModifier,
+                    )
+                }
             }
             if (!step.intent.isNullOrBlank()) {
-                Text(
-                    "Intent: ${step.intent}",
-                    fontSize = 11.sp,
-                    color = colors.textSecondary,
-                )
+                CopyableMessageContainer(text = step.intent, colors = colors) { longPressModifier ->
+                    Text(
+                        stringResource(R.string.batch_step_intent, step.intent),
+                        fontSize = 11.sp,
+                        color = colors.textSecondary,
+                        modifier = longPressModifier,
+                    )
+                }
             }
         }
     }
@@ -1775,6 +1685,8 @@ private fun parseToolStepsFromContent(content: String, fallbackTimestamp: Long):
 private fun ChatInputBar(
     isAwaitingReply: Boolean,
     isTaskRunning: Boolean,
+    isTaskStopping: Boolean = false,
+    otherModeBusy: Boolean = false,
     inputEnabled: Boolean = true,
     isTaskMode: Boolean,
     usesExplicitInputModes: Boolean,
@@ -1824,6 +1736,8 @@ private fun ChatInputBar(
     }
 
     fun submitInput() {
+        // While a stop is being confirmed the control is inert: no re-send, no second stop request.
+        if (isTaskStopping) return
         if (isTaskRunning) {
             onStopAll()
             return
@@ -1968,13 +1882,22 @@ private fun ChatInputBar(
                     }
                 },
                 trailingIcon = {
+                    val locked = isTaskStopping || otherModeBusy
                     Surface(
                         onClick = { submitInput() },
+                        enabled = !locked,
                         modifier = Modifier
                             .size(34.dp)
-                            .alpha(if ((text.isBlank() || !inputEnabled || isAwaitingReply) && !isTaskRunning) 0.35f else 1f),
+                            .alpha(
+                                when {
+                                    locked -> 0.35f
+                                    (text.isBlank() || !inputEnabled || isAwaitingReply) && !isTaskRunning -> 0.35f
+                                    else -> 1f
+                                }
+                            ),
                         shape = StraightControlShape,
                         color = when {
+                            isTaskStopping -> colors.textTertiary
                             isTaskRunning -> Color(0xFFF44336)
                             isAwaitingReply -> colors.background
                             text.isBlank() -> colors.background
@@ -1985,11 +1908,13 @@ private fun ChatInputBar(
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
                                 when {
+                                    isTaskStopping -> Icons.Default.HourglassTop
                                     isTaskRunning -> Icons.Default.Close
                                     isAwaitingReply -> Icons.Default.MoreHoriz
                                     else -> Icons.Default.ArrowUpward
                                 },
                                 contentDescription = when {
+                                    isTaskStopping -> stringResource(R.string.chat_stopping)
                                     isTaskRunning -> stringResource(R.string.chat_stop)
                                     isAwaitingReply -> stringResource(R.string.chat_cd_waiting)
                                     else -> stringResource(R.string.chat_cd_send)
@@ -2008,6 +1933,7 @@ private fun ChatInputBar(
                 VoiceMicButton(
                     voiceEnabled = true,
                     colors = colors,
+                    enabled = !isTaskStopping,
                     onRequestRecordPermission = onRequestRecordPermission,
                     onText = { text = it },
                     onRecordingChange = { isVoiceRecording = it },

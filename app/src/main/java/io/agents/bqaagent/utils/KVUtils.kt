@@ -489,4 +489,5 @@ object KVUtils {
 
     fun getActiveVlmProfileId(): String = getString(KEY_ACTIVE_VLM_PROFILE_ID, "")
     fun setActiveVlmProfileId(value: String) = putString(KEY_ACTIVE_VLM_PROFILE_ID, value)
+
 }

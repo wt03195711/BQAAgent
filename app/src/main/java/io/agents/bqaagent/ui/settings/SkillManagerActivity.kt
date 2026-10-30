@@ -37,7 +37,10 @@ class SkillManagerActivity : BaseActivity() {
     private val expandedSkillIds = mutableSetOf<String>()
 
     private val detailGson by lazy {
-        GsonBuilder().setPrettyPrinting().serializeNulls().disableHtmlEscaping().create()
+        // Must mirror SkillStore's persistence Gson (no serializeNulls): the detail dialog
+        // should show exactly what is on disk, so legacy-only fields that new templates
+        // omit (e.g. anchorTexts) do not reappear here as fake "null" entries.
+        GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

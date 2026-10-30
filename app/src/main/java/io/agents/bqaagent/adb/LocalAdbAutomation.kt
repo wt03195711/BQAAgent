@@ -20,6 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import java.io.InterruptedIOException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.Collections
@@ -76,16 +77,6 @@ object LocalAdbAutomation {
 
     @Volatile
     private var lastRediscoverAt = 0L
-
-    data class SetupRequest(
-        val host: String,
-        val connectPort: Int,
-        val pairPort: Int? = null,
-        val pairingCode: String? = null,
-    ) {
-        val needsPairing: Boolean
-            get() = pairPort != null && !pairingCode.isNullOrBlank()
-    }
 
     data class PairingInput(
         val host: String,
@@ -172,6 +163,13 @@ object LocalAdbAutomation {
     fun exec(command: String, timeoutMs: Long = 15_000L): ShellCommandResult {
         val first = exec(command, timeoutMs, logFailure = true)
         if (first.isSuccess || !isTransportFailure(first)) return first
+        // A cancel-driven thread interrupt surfaces here as a transport failure, but the channel
+        // itself may be fine — and reconnection on an interrupted thread is doomed to fail while
+        // still consuming the 60s rediscover cooldown, disabling recovery for the NEXT task too.
+        if (Thread.currentThread().isInterrupted) {
+            XLog.i(TAG, "Local ADB exec failed on an interrupted thread; skipping auto-reconnect: $command")
+            return first
+        }
         if (!attemptRediscoverAndReconnect()) return first
         if (!isRetrySafeCommand(command)) {
             XLog.i(TAG, "Local ADB auto-reconnected; skipping retry for non-idempotent command: $command")
@@ -191,8 +189,12 @@ object LocalAdbAutomation {
         } catch (e: Throwable) {
             acquisitionError = e.message ?: e.toString()
             resetClient()
-            markFailed()
-            if (logFailure) {
+            val selfInflicted = e is InterruptedException || e is InterruptedIOException ||
+                Thread.currentThread().isInterrupted
+            if (!selfInflicted) {
+                markFailed()
+            }
+            if (logFailure && !selfInflicted) {
                 XLog.w(TAG, "Local ADB connection could not be established for: $command", e)
             }
             null
@@ -217,8 +219,14 @@ object LocalAdbAutomation {
             )
         } catch (e: Throwable) {
             resetClient()
-            markFailed()
-            if (logFailure) {
+            // An interrupt locally aborted the socket read; that is not evidence adbd died.
+            // markFailed() here would flap the UI to "Disconnected" for 15s+ on every cancel.
+            val selfInflicted = e is InterruptedException || e is InterruptedIOException ||
+                Thread.currentThread().isInterrupted
+            if (!selfInflicted) {
+                markFailed()
+            }
+            if (logFailure && !selfInflicted) {
                 XLog.w(TAG, "Local ADB command failed: $command", e)
             }
             ShellCommandResult(-1, false, "", e.message ?: e.toString())
@@ -231,12 +239,7 @@ object LocalAdbAutomation {
         return result.stdout.trim().toIntOrNull() ?: -1
     }
 
-    @JvmStatic
-    fun configureConnection(host: String, connectPort: Int): ShellCommandResult {
-        return configureConnection(host, connectPort, logFailure = true)
-    }
-
-    private fun configureConnection(host: String, connectPort: Int, logFailure: Boolean): ShellCommandResult {
+    fun configureConnection(host: String, connectPort: Int, logFailure: Boolean = true): ShellCommandResult {
         val cleanHost = host.ifBlank { DEFAULT_HOST }
         if (connectPort <= 0) {
             return ShellCommandResult(-1, false, "", "Invalid Local ADB connect port.")
@@ -248,7 +251,7 @@ object LocalAdbAutomation {
         if (result.isSuccess && hasSavedIdentity()) {
             KVUtils.setLocalAdbPaired(true)
             markReady()
-        } else if (!result.isSuccess) {
+        } else {
             markFailed()
         }
         return result
@@ -313,20 +316,6 @@ object LocalAdbAutomation {
     }
 
     @JvmStatic
-    fun pairAndConfigure(request: SetupRequest): ShellCommandResult {
-        if (request.connectPort <= 0) {
-            return ShellCommandResult(-1, false, "", "Invalid Local ADB connect port.")
-        }
-
-        if (request.needsPairing) {
-            val pairResult = pair(request.host, request.pairPort ?: 0, request.pairingCode.orEmpty())
-            if (!pairResult.isSuccess) return pairResult
-        }
-
-        return configureConnection(request.host, request.connectPort)
-    }
-
-    @JvmStatic
     fun pairAndConfigureByDiscovery(
         context: Context,
         host: String,
@@ -340,7 +329,9 @@ object LocalAdbAutomation {
         val connectPort = discovery.connectPort
         if (connectPort != null) {
             val connectHost = discovery.connectHost ?: discovery.host.ifBlank { DEFAULT_HOST }
-            return configureConnection(connectHost, connectPort)
+            val direct = configureConnection(connectHost, connectPort, logFailure = false)
+            if (direct.isSuccess) return direct
+            XLog.w(TAG, "Local ADB connect via discovered port $connectHost:$connectPort failed; scanning for the live port")
         }
 
         return scanAndConfigureConnection(listOf(DEFAULT_HOST, discovery.connectHost, discovery.host))
@@ -387,7 +378,9 @@ object LocalAdbAutomation {
             val connectHost = connectDiscovery.connectHost
                 ?: firstDiscovery.connectHost
                 ?: connectDiscovery.host.ifBlank { firstDiscovery.host }
-            return configureConnection(connectHost.ifBlank { DEFAULT_HOST }, connectPort)
+            val direct = configureConnection(connectHost.ifBlank { DEFAULT_HOST }, connectPort, logFailure = false)
+            if (direct.isSuccess) return direct
+            XLog.w(TAG, "Local ADB connect via discovered port $connectHost:$connectPort failed; scanning for the live port")
         }
 
         return scanAndConfigureConnection(
@@ -414,27 +407,32 @@ object LocalAdbAutomation {
             return ShellCommandResult(0, false, READY_PROBE, "")
         }
 
+        val savedHost = KVUtils.getLocalAdbHost().ifBlank { DEFAULT_HOST }
+        val savedPort = KVUtils.getLocalAdbPort()
+
         val discovery = LocalAdbDiscovery.discoverBlocking(context.applicationContext, timeoutMs)
         val connectPort = discovery.connectPort
         if (connectPort != null) {
             val connectHost = discovery.connectHost ?: discovery.host.ifBlank { DEFAULT_HOST }
-            val result = configureConnection(connectHost, connectPort)
+            val result = configureConnection(connectHost, connectPort, logFailure = false)
             if (result.isSuccess) {
                 KVUtils.setLocalAdbPaired(true)
+                return result
             }
-            return result
+            XLog.w(TAG, "Local ADB reconnect via discovered port $connectHost:$connectPort failed; trying saved port then scan")
         }
 
-        val savedPort = KVUtils.getLocalAdbPort()
         if (savedPort > 0) {
-            val result = configureConnection(KVUtils.getLocalAdbHost().ifBlank { DEFAULT_HOST }, savedPort)
+            val result = configureConnection(savedHost, savedPort, logFailure = false)
             if (result.isSuccess) {
                 KVUtils.setLocalAdbPaired(true)
+                return result
             }
-            return result
         }
 
-        return ShellCommandResult(-1, false, "", context.getString(R.string.local_adb_connect_port_missing))
+        return scanAndConfigureConnection(
+            listOf(DEFAULT_HOST, discovery.connectHost, discovery.host, savedHost)
+        ) ?: ShellCommandResult(-1, false, "", context.getString(R.string.local_adb_connect_port_missing))
     }
 
     private fun scanAndConfigureConnection(hostCandidates: List<String?>): ShellCommandResult? {
@@ -500,53 +498,6 @@ object LocalAdbAutomation {
                 true
             }
         }.getOrDefault(false)
-    }
-
-    @JvmStatic
-    fun parseSetupInput(raw: String): SetupRequest? {
-        val tokens = raw
-            .trim()
-            .split(Regex("[,\\s]+"))
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-        if (tokens.isEmpty()) return null
-
-        var host = DEFAULT_HOST
-        var connectPort: Int? = null
-        var cursor = 0
-
-        val first = tokens[0]
-        val hostPort = parseHostPort(first)
-        if (hostPort != null) {
-            host = hostPort.first
-            connectPort = hostPort.second
-            cursor = 1
-        } else {
-            val firstPort = first.toIntOrNull()
-            if (firstPort != null) {
-                connectPort = firstPort
-                cursor = 1
-            } else if (tokens.size >= 2) {
-                host = first
-                connectPort = tokens[1].toIntOrNull()
-                cursor = 2
-            }
-        }
-
-        val port = connectPort ?: return null
-        if (port <= 0 || port > 65535) return null
-
-        val pairPort = tokens.getOrNull(cursor)?.toIntOrNull()
-        val pairingCode = tokens.getOrNull(cursor + 1)
-        if (pairPort != null && (pairPort <= 0 || pairPort > 65535)) return null
-        if (pairPort != null && pairingCode.isNullOrBlank()) return null
-
-        return SetupRequest(
-            host = host.ifBlank { DEFAULT_HOST },
-            connectPort = port,
-            pairPort = pairPort,
-            pairingCode = pairingCode?.takeIf { it.isNotBlank() },
-        )
     }
 
     @JvmStatic
@@ -713,14 +664,24 @@ object LocalAdbAutomation {
             if (now - lastRediscoverAt < REDISCOVER_COOLDOWN_MS) return false
             lastRediscoverAt = now
             val discovery = LocalAdbDiscovery.discoverBlocking(context, REDISCOVER_DISCOVERY_TIMEOUT_MS)
-            val connectPort = discovery.connectPort ?: return false
-            val connectHost = discovery.connectHost ?: discovery.host.ifBlank { DEFAULT_HOST }
-            val result = configureConnection(connectHost, connectPort, logFailure = false)
-            if (result.isSuccess) {
-                XLog.i(TAG, "Local ADB auto-reconnect succeeded host=$connectHost port=$connectPort")
+            val connectPort = discovery.connectPort
+            if (connectPort != null) {
+                val connectHost = discovery.connectHost ?: discovery.host.ifBlank { DEFAULT_HOST }
+                val result = configureConnection(connectHost, connectPort, logFailure = false)
+                if (result.isSuccess) {
+                    XLog.i(TAG, "Local ADB auto-reconnect succeeded host=$connectHost port=$connectPort")
+                    return true
+                }
+                XLog.w(TAG, "Local ADB auto-reconnect via discovered port $connectHost:$connectPort failed; scanning for the live port")
+            }
+            val scanned = scanAndConfigureConnection(
+                listOf(DEFAULT_HOST, discovery.connectHost, discovery.host, KVUtils.getLocalAdbHost())
+            )
+            if (scanned?.isSuccess == true) {
+                XLog.i(TAG, "Local ADB auto-reconnect via port scan succeeded host=${KVUtils.getLocalAdbHost()} port=${KVUtils.getLocalAdbPort()}")
                 return true
             }
-            XLog.w(TAG, "Local ADB auto-reconnect failed host=$connectHost port=$connectPort: ${result.combinedOutput}")
+            XLog.w(TAG, "Local ADB auto-reconnect failed: no live port found")
             return false
         } catch (e: Throwable) {
             XLog.w(TAG, "Local ADB auto-reconnect threw", e)

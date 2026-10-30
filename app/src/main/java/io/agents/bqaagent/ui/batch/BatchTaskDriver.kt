@@ -95,7 +95,7 @@ class BatchTaskDriver(
         /** Driver-thread poll granularity for cancel + hang detection. */
         private const val POLL_MS = 1_000L
         /** Wait for the session lock to drop after a cancel before deciding ABANDONED. */
-        private const val CANCEL_GRACE_MS = 6_000L
+        private const val CANCEL_GRACE_MS = 60_000L
         /** Wait for the session lock to drop after a normal settle before the next dispatch. */
         private const val SESSION_RELEASE_TIMEOUT_MS = 5_000L
         /** adbd liveness probe before each task. */
@@ -107,6 +107,17 @@ class BatchTaskDriver(
         private const val RETURN_TO_APP_SETTLE_MS = 1_200L
         /** Bound on waiting for the previous task's async recording stop before arming the next task. */
         private const val RECORDER_IDLE_TIMEOUT_MS = 12_000L
+
+        /**
+         * The one live batch run, process-wide. The floating pill and any foreign stop entry need a
+         * handle that survives Activity recreation — the ViewModel is activity-scoped, so before this
+         * existed a stop request from outside the batch screen could only ever reach the current task
+         * and the batch quietly moved on to the next one.
+         */
+        private val activeRef = java.util.concurrent.atomic.AtomicReference<BatchTaskDriver?>(null)
+
+        @JvmStatic
+        fun active(): BatchTaskDriver? = activeRef.get()
     }
 
 
@@ -139,6 +150,13 @@ class BatchTaskDriver(
     private val _sensitiveConfirmPrompt = MutableStateFlow<BatchSensitiveConfirmPrompt?>(null)
     val sensitiveConfirmPrompt: StateFlow<BatchSensitiveConfirmPrompt?> = _sensitiveConfirmPrompt.asStateFlow()
 
+    // In-flight transcript of the currently RUNNING task, published on every pipeline event so the
+    // per-task detail screen can render steps LIVE. The disk conversation is only persisted once a
+    // task settles, so without this flow the detail would show just the task text while running.
+    // Cleared by the driver thread between tasks; the VM clears it when the run ends.
+    private val _liveTaskTranscript = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val liveTaskTranscript: StateFlow<List<ChatMessage>> = _liveTaskTranscript.asStateFlow()
+
     private val masterMessages = mutableListOf<ChatMessage>()
     private val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
     private var halted = false
@@ -158,14 +176,26 @@ class BatchTaskDriver(
 
     fun start() {
         if (_state.value.running || _state.value.finished) return
+        if (activeRef.get()?.isRunning == true) {
+            XLog.w(TAG, "Another batch run is already active; start refused")
+            halt("Another batch run is in progress. Stop it first.")
+            finish(cancelled = false)
+            return
+        }
+        activeRef.set(this)
         driverThread = Thread({ runBatch() }, "batch-driver").apply { isDaemon = true; start() }
     }
 
     /** User-initiated stop: cancel the in-flight task (if any) and end the loop after it settles. */
     fun cancel() {
-        if (cancelled.getAndSet(true)) return
+        if (cancelled.getAndSet(true)) {
+            // Already cancelling: still re-fire the orchestrator intent so a pill tap and a batch
+            // screen tap converge on the same stop request.
+            runCatching { orchestrator.cancelCurrentTask("batch-nag") }
+            return
+        }
         XLog.i(TAG, "Batch cancel requested")
-        runCatching { orchestrator.cancelCurrentTask() }
+        runCatching { orchestrator.cancelCurrentTask("batch-ui") }
     }
 
     // ==================== Main loop ====================
@@ -175,8 +205,8 @@ class BatchTaskDriver(
             finish(cancelled = false)
             return
         }
-        if (orchestrator.isTaskRunning()) {
-            XLog.w(TAG, "Another task is already running; batch aborted")
+        if (orchestrator.isTaskRunning() || orchestrator.busyNow()) {
+            XLog.w(TAG, "Another task is running or still stopping; batch aborted")
             halt("Another task is running. Stop it first.")
             finish(cancelled = false)
             return
@@ -260,6 +290,12 @@ class BatchTaskDriver(
             XLog.e(TAG, "Batch loop crashed: ${t.message}", t)
             halt("Batch crashed: ${t.message}")
         } finally {
+            // Bounded wait so the batch only reports itself finished once the orchestrator is really
+            // idle. On timeout the stall is logged and surfaced as a halt reason rather than a lie.
+            if (!awaitOrchestratorIdle(CANCEL_GRACE_MS)) {
+                XLog.w(TAG, "Orchestrator still busy at batch teardown")
+                halt(if (haltReason != null) haltReason!! else "Background task did not stop cleanly.")
+            }
             persist()
             finish(cancelled = cancelled.get())
         }
@@ -340,6 +376,11 @@ class BatchTaskDriver(
                 updateView(index, BatchTaskPhase.HANG_TIMEOUT, endedAt = endedAt, durationMs = endedAt - startedAt)
                 awaitSessionRelease(SESSION_RELEASE_TIMEOUT_MS)
                 return if (hung) TaskOutcome.HANG_TIMEOUT else TaskOutcome.HANG_TIMEOUT
+            } else {
+                // Hand the full transcript (terminal bubble included) to the live flow BEFORE the
+                // between-tasks clear below, so an open detail screen never flashes back to partial
+                // content in the settle gap.
+                _liveTaskTranscript.value = builder.transcript
             }
 
             val resolved = builder.appendTerminal(terminal)
@@ -390,7 +431,16 @@ class BatchTaskDriver(
             )
 
             // Wait for the session lock to actually drop before the next dispatch (Completed precedes releaseTask).
-            awaitSessionRelease(SESSION_RELEASE_TIMEOUT_MS)
+            if (!awaitOrchestratorIdle(SESSION_RELEASE_TIMEOUT_MS)) {
+                XLog.w(TAG, "Orchestrator still busy after task #$index settled — skipping the next dispatch")
+                // Never dispatch on top of a live loop: the engine would reject the run and the task
+                // would be lost silently. Report it as an abandoned task instead.
+                masterMessages.add(
+                    ChatMessage(ChatMessage.Role.SYSTEM, "⏹️ Previous task did not finish stopping; halting batch to avoid overlap.")
+                )
+                halt("A task did not finish stopping. Batch stopped to avoid overlapping runs.")
+                return TaskOutcome.ABANDONED
+            }
             return when {
                 hung -> TaskOutcome.HANG_TIMEOUT
                 failed -> TaskOutcome.SETTLED_FAILED
@@ -399,6 +449,7 @@ class BatchTaskDriver(
         } finally {
             taskLatch = null
             currentBuilder = null
+            _liveTaskTranscript.value = emptyList()
         }
     }
 
@@ -451,6 +502,8 @@ class BatchTaskDriver(
             }
             else -> currentBuilder?.onEvent(event)
         }
+        // Surface the freshly-updated in-flight transcript to the live detail view.
+        currentBuilder?.let { _liveTaskTranscript.value = it.transcript }
     }
 
     // ==================== Device / ADB helpers ====================
@@ -491,11 +544,20 @@ class BatchTaskDriver(
         }
     }
 
+    /**
+     * Wait until the orchestrator has no session, no engine run and no live worker thread. The old
+     * wait keyed off the session lock alone, which the cancel released BEFORE the loop was
+     * interrupted, so a "settled" task could still be driving the device underneath the next dispatch.
+     */
+    private fun awaitOrchestratorIdle(timeoutMs: Long): Boolean =
+        orchestrator.awaitIdle(timeoutMs)
+
     private fun awaitSessionRelease(timeoutMs: Long) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (orchestrator.isTaskRunning() && System.currentTimeMillis() < deadline) {
             if (!sleepInterruptible(SESSION_POLL_MS)) return
         }
+        awaitOrchestratorIdle((deadline - System.currentTimeMillis()).coerceAtLeast(0L))
     }
 
     /** Block until the recorder finishes stopping the previous task (or the timeout / a cancel hits). */
@@ -634,6 +696,7 @@ class BatchTaskDriver(
 
     private fun finish(cancelled: Boolean) {
         orchestrator.taskEventCallback = null
+        activeRef.compareAndSet(this, null)
         // Defensive: never leave an upload dialog hanging after the whole run ends.
         _userImagePrompt.value = null
         // Publish the terminal snapshot FIRST. The VM collector keys off `finished` to fold results,

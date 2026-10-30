@@ -33,9 +33,62 @@ object SkillRecorder {
         "system_key",
         "swipe",
         "wait",
+        // Composite loop tool: recorded as ONE opaque step. Its embedded actions replay
+        // verbatim (substitution cannot reach inside the actions JSON), and step verification
+        // relies on package/activity + post-loop stable keys (no next-step target element).
+        "repeat_actions",
         "send_message", "send_file", "clipboard",
-        "make_call", "search_app_in_store", "auto_reply"
+        "make_call", "auto_reply"
     )
+
+    /**
+     * Tools whose next action addresses an element that is ALREADY on the current screen, so
+     * the element's absence after the previous step is a genuine failure.
+     * open_app/open_url (launch), system_key/swipe (no target element), wait and the read-only
+     * tools are intentionally absent: they define no expectation at all.
+     */
+    private val NEXT_STEP_STRICT_TOOLS = setOf(
+        "tap_node", "tap", "long_press", "tap_visible_text",
+        "input_text", "input_amount", "secure_keypad_input"
+    )
+
+    /**
+     * Tools that scroll until the target appears (FindAndTapTool / ScrollToFindTool), so the
+     * target may legitimately be off-screen right after the previous step: absence is a warning.
+     */
+    private val NEXT_STEP_LENIENT_TOOLS = setOf("find_and_tap", "scroll_to_find")
+
+    /**
+     * Tools whose value parameter IS an on-screen label (getValueParamNames() = "text"),
+     * as opposed to the content being typed or the package being launched.
+     */
+    private val NEXT_STEP_LABEL_PARAM_TOOLS = setOf("tap_visible_text", "find_and_tap", "scroll_to_find")
+
+    /** Tools that act on a field; only the field node is assertable, never its content. */
+    private val INPUT_TARGET_TOOLS = setOf("input_text", "input_amount", "secure_keypad_input")
+
+    /**
+     * Reasons for an empty targetText that are expected by design, NOT a capture failure:
+     *  - INPUT_VALUE: an input tool's value param is the payload being typed (text / amount /
+     *    PIN digits); we deliberately never store it as a target label (field identity lives in
+     *    nodeLocator / the next-step expectation instead).
+     *  - NOT_APPLICABLE: non-target action tools (swipe, system_key, wait, repeat_actions, …)
+     *    act on no labelled on-screen element, so there is nothing to reverse-look-up.
+     * Every other empty reason (BAD_COORDS / POINT_IN_GAP / NO_DUMP / NODE_NO_TEXT / ERROR) is a
+     * genuine miss and stays a warning.
+     */
+    private val EXPECTED_EMPTY_TARGET_REASONS = setOf("INPUT_VALUE", "NOT_APPLICABLE")
+
+    /** Labels carrying these characters are content values (amounts, dates, counters), not identity. */
+    private val VOLATILE_LABEL_SYMBOLS = charArrayOf('¥', '￥', '$', '€', '£', '%')
+
+    /**
+     * Cap on structural keys stored per step. This is soft (T3) verification evidence that can
+     * only corroborate a screen - it never fails a step on its own - so a handful of the
+     * strongest identity keys is plenty; capture keeps the highest-authority ones (resource-id,
+     * then content-description) and drops the rest.
+     */
+    private const val STABLE_KEYS_MAX = 5
 
     @Volatile
     private var isRecording = false
@@ -92,21 +145,28 @@ object SkillRecorder {
         elapsedMs: Long = 0L,
         expectedPackageAfter: String = "",
         expectedActivityAfter: String = "",
-        anchorTexts: List<String> = emptyList(),
         nodeLocator: NodeLocator? = null,
         intent: String = "",
         precomputedTargetText: String? = null,
         sensitive: Boolean = false,
-        confirmSummary: String = ""
+        confirmSummary: String = "",
+        stableKeys: List<StableElementKey>? = null
     ) {
         if (!isRecording) return
         if (toolName !in RECORDABLE_TOOLS) return
+
+        // anchorTexts is a LEGACY-only verification evidence: new templates never write it, not
+        // even when structural capture came up empty (that step then honestly carries no T3
+        // evidence and verification falls back to package/activity + next-step expectation).
+        // The field and the verifier's anchors branch exist solely for historical templates.
 
         // NEVER re-capture locator / targetText here: recordStep runs AFTER
         // execution, when Opt-3 has already rebuilt nodeIdMap for the NEW
         // screen. Any lookup at this point would resolve against the wrong
         // screen. Pre-execution captures passed in by the agent loop are the
         // only trusted source; missing data is recorded as-is (empty/null).
+        // stableKeys is the one exception by design: it is read from that same
+        // post-action node map (the screen this step produced) and never by nodeId.
         val step = RecordedSkillStep(
             stepIndex = recordedSteps.size,
             toolName = toolName,
@@ -115,15 +175,140 @@ object SkillRecorder {
             elapsedMs = elapsedMs,
             expectedPackageAfter = expectedPackageAfter,
             expectedActivityAfter = expectedActivityAfter,
-            anchorTexts = anchorTexts,
+            anchorTexts = null,
             nodeLocator = nodeLocator,
             targetText = precomputedTargetText.orEmpty(),
             intent = normalizeStepIntent(intent).takeIf { it.isNotBlank() },
             sensitive = sensitive,
-            confirmSummary = confirmSummary
+            confirmSummary = confirmSummary,
+            stableKeys = stableKeys
         )
         recordedSteps.add(step)
         XLog.d(TAG, "Recorded step ${step.stepIndex}: $toolName")
+    }
+
+    /**
+     * Back-fill the previous recorded step with the element THIS round is about to act upon.
+     *
+     * Timing is the whole trick: the agent loop calls this after the previous step's Opt-3
+     * refresh and before the current tool runs, so nodeIdMap still describes the screen the
+     * previous step produced, while the locator/target text about to be used is exactly the
+     * element that screen must expose for the sequence to continue. Costs no extra dump and
+     * no LLM round - the data is already captured for the step itself.
+     *
+     * First expectation wins: an intervening read-only round must not overwrite a stronger
+     * expectation, and a step never gets more than one.
+     */
+    @Synchronized
+    fun attachNextStepExpectation(
+        toolName: String,
+        locator: NodeLocator?,
+        targetText: String,
+        targetTextSource: String
+    ) {
+        if (!isRecording) return
+        val expectation = buildNextStepExpectation(toolName, locator, targetText, targetTextSource) ?: return
+        val lastIndex = recordedSteps.size - 1
+        if (lastIndex < 0) return
+        val previous = recordedSteps[lastIndex]
+        if (previous.nextExpectation != null) return
+        recordedSteps[lastIndex] = previous.copy(nextExpectation = expectation)
+        XLog.d(
+            TAG, "Attached next-step expectation to step ${previous.stepIndex} (${previous.toolName}): " +
+                    "text='${expectation.text}' desc='${expectation.contentDescription}' " +
+                    "id='${expectation.resourceId}' strict=${expectation.strict} origin=${expectation.origin}"
+        )
+    }
+
+    private fun buildNextStepExpectation(
+        toolName: String,
+        locator: NodeLocator?,
+        targetText: String,
+        targetTextSource: String
+    ): NextStepExpectation? {
+        val strict = when {
+            toolName in NEXT_STEP_STRICT_TOOLS -> true
+            toolName in NEXT_STEP_LENIENT_TOOLS -> false
+            else -> return null
+        }
+        var text = ""
+        var desc = ""
+        var id = ""
+        var origin = ""
+        if (locator != null) {
+            id = locator.resourceId.trim()
+            desc = locator.contentDescription.trim()
+            // An input step's field is identified by id/desc only: its current text is the
+            // value being typed, or a leftover from the recording run - never a stable identity.
+            text = if (toolName in INPUT_TARGET_TOOLS) "" else locator.text.trim()
+            origin = if (toolName in INPUT_TARGET_TOOLS) "INPUT_FIELD" else "NODE"
+        } else {
+            if (toolName in INPUT_TARGET_TOOLS) return null
+            val label = targetText.trim()
+            if (label.isEmpty()) return null
+            val usable = targetTextSource.startsWith("COORD_") ||
+                    (targetTextSource == "VALUE_PARAM" && toolName in NEXT_STEP_LABEL_PARAM_TOOLS)
+            if (!usable) return null
+            text = label
+            origin = if (targetTextSource == "VALUE_PARAM") "LABEL_PARAM" else "COORD_LABEL"
+        }
+        if (text.isBlank() && desc.isBlank() && id.isBlank()) return null
+        // A value-like label is a legitimate tap target but not a stable identity across runs:
+        // keep it as evidence, but its absence may not fail the step.
+        val effectiveStrict = strict && !(text.isNotBlank() && isVolatileLabel(text))
+        return NextStepExpectation(
+            text = text,
+            contentDescription = desc,
+            resourceId = id,
+            strict = effectiveStrict,
+            origin = origin
+        )
+    }
+
+    /**
+     * Stable structural keys of the CURRENT screen (verification T3). Only author-written
+     * identity survives content changes, so resource-id / content-description are required and
+     * value-like labels are dropped. Soft evidence by construction: capture is best-effort and a
+     * failure to read the node map simply yields no keys.
+     */
+    @Synchronized
+    fun captureStableKeys(): List<StableElementKey> {
+        if (!isRecording) return emptyList()
+        return try {
+            val nodes = LocalAdbDeviceDriver.currentMappedNodes()
+            if (nodes.isEmpty() || isNodeMapFromOtherApp()) {
+                XLog.d(TAG, "Stable keys skipped: ${nodeMapDiag()}")
+                emptyList()
+            } else {
+                nodes.asSequence()
+                    .filter { it.enabled && it.bounds.width() > 0 && it.bounds.height() > 0 }
+                    .map { node ->
+                        StableElementKey(
+                            resourceId = node.resourceId.trim(),
+                            contentDescription = node.contentDescription.trim(),
+                            text = node.text.trim()
+                        )
+                    }
+                    .filter { it.resourceId.isNotBlank() || it.contentDescription.isNotBlank() }
+                    .filter { it.text.isBlank() || !isVolatileLabel(it.text) }
+                    .distinct()
+                    .sortedWith(
+                        compareByDescending<StableElementKey> { it.resourceId.isNotBlank() }
+                            .thenByDescending { it.contentDescription.isNotBlank() }
+                    )
+                    .take(STABLE_KEYS_MAX)
+                    .toList()
+            }
+        } catch (e: Exception) {
+            XLog.w(TAG, "captureStableKeys failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** Digits / currency / percent make a label a value, not an identity. */
+    private fun isVolatileLabel(label: String): Boolean {
+        if (label.isBlank()) return true
+        return label.any { it.isDigit() || it in VOLATILE_LABEL_SYMBOLS }
     }
 
     fun isRecordableTool(toolName: String): Boolean = toolName in RECORDABLE_TOOLS
@@ -209,7 +394,20 @@ object SkillRecorder {
         return captureTargetTextDetailed(toolName, params, locator).text
     }
 
-    private data class TargetTextCapture(val text: String, val reason: String)
+    /**
+     * Same single capture, with provenience. The agent loop needs the reason because a
+     * captured string only qualifies as a next-step expectation when it describes an element
+     * on screen, which depends on the tool that produced it (see [attachNextStepExpectation]).
+     */
+    fun captureTargetTextInfo(
+        toolName: String,
+        params: Map<String, Any>,
+        locator: NodeLocator?
+    ): TargetTextCapture {
+        return captureTargetTextDetailed(toolName, params, locator)
+    }
+
+    data class TargetTextCapture(val text: String, val reason: String)
 
     private fun captureTargetTextDetailed(toolName: String, params: Map<String, Any>, locator: NodeLocator?): TargetTextCapture {
         val capture = try {
@@ -228,8 +426,16 @@ object SkillRecorder {
                     val fromParam = valueKeys.firstNotNullOfOrNull { key ->
                         params[key]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
                     }
-                    if (fromParam != null) TargetTextCapture(fromParam, "VALUE_PARAM")
-                    else if (toolName == "tap" || toolName == "long_press") lookupTextByCoordinate(params)
+                    // INPUT tools: the value param is the payload being typed (text / amount / PIN
+                    // digits), NOT an on-screen target label. Storing it as targetText would persist a
+                    // sensitive value that replay never reads (targetText is consumed only by
+                    // SELECTION_TOOLS) and the real value already lives in step.params. Record it as
+                    // absent - the field identity is captured via nodeLocator / next-step expectation.
+                    if (fromParam != null && toolName in INPUT_TARGET_TOOLS) {
+                        TargetTextCapture("", "INPUT_VALUE")
+                    } else if (fromParam != null) {
+                        TargetTextCapture(fromParam, "VALUE_PARAM")
+                    } else if (toolName == "tap" || toolName == "long_press") lookupTextByCoordinate(params)
                     else TargetTextCapture("", "NOT_APPLICABLE")
                 }
             }
@@ -238,7 +444,11 @@ object SkillRecorder {
             TargetTextCapture("", "ERROR")
         }
         if (capture.text.isEmpty()) {
-            XLog.w(TAG, "TargetText capture EMPTY: tool=$toolName reason=${capture.reason} ${nodeMapDiag()}")
+            if (capture.reason in EXPECTED_EMPTY_TARGET_REASONS) {
+                XLog.d(TAG, "TargetText intentionally empty: tool=$toolName reason=${capture.reason}")
+            } else {
+                XLog.w(TAG, "TargetText capture EMPTY: tool=$toolName reason=${capture.reason} ${nodeMapDiag()}")
+            }
         } else {
             XLog.d(TAG, "TargetText capture OK: tool=$toolName reason=${capture.reason} text='${capture.text.take(40)}'")
         }

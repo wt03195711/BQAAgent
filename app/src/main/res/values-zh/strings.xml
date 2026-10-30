@@ -515,5 +515,12 @@
     <string name="settings_skill_capture_off_toast">技能捕获模式已关闭：任务恢复跟随聊天历史，技能保存停用</string>
     <string name="common_got_it">知道了</string>
     <string name="settings_sensitive_mode_subtitle">触及支付、密码等界面前先确认</string>
+    <string name="chat_stopping">停止中…</string>
+    <string name="mode_lock_batch_busy">批量任务进行中，请先停止后再发起对话任务。</string>
+    <string name="mode_lock_chat_busy">对话任务进行中，请先停止后再启动批量任务。</string>
+    <string name="mode_lock_stopping">上一个任务仍在停止中，请稍候。</string>
+    <string name="mode_lock_batch_running_locked">批量任务执行中，停止前无法切回对话界面。</string>
+    <string name="mode_lock_chat_running_locked">任务执行中，停止前无法离开当前界面。</string>
+    <string name="task_cancel_not_stopped">后台任务未完全停止，工作区已保持锁定直到其退出；请检查本地 ADB 与目标 App。</string>
 
 </resources>

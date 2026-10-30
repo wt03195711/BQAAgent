@@ -130,6 +130,16 @@ public class SwipeTool extends BaseTool {
             note = correctionNote.toString();
         }
 
+        // Both endpoints matter — either one inside the pill turns the intended swipe
+        // into a pill drag. Check the FINAL coordinates (post-synthesis / correction),
+        // not the raw LLM params — those are what actually get executed and what
+        // performSwipe's own defensive guard sees; using raw here would either miss
+        // pill hits introduced by relocation, or false-positive on unused default 0s.
+        String startMsg = driver.overlayBlockedMessage(fromX, fromY, "swipe start");
+        if (startMsg != null) return ToolResult.error(startMsg);
+        String endMsg = driver.overlayBlockedMessage(toX, toY, "swipe end");
+        if (endMsg != null) return ToolResult.error(endMsg);
+
         boolean success = driver.performSwipe(fromX, fromY, toX, toY, duration);
         if (!success) {
             return ToolResult.error("Failed to swipe");

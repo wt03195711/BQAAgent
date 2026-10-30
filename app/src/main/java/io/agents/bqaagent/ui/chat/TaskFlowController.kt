@@ -51,6 +51,12 @@ data class TaskFlowUiState(
     val modelStatus: MutableState<String>,
     val isAwaitingReply: MutableState<Boolean>,
     val isTaskRunning: MutableState<Boolean>,
+    /**
+     * True from the moment the user taps stop until the orchestrator confirms the background loop and
+     * all worker threads are gone. The send/stop control is disabled and reads "Stopping…" while set,
+     * mirroring the batch screen's cancelling lock; the input never unlocks on a timer alone.
+     */
+    val isTaskStopping: MutableState<Boolean> = androidx.compose.runtime.mutableStateOf(false),
     val showUserImageUpload: MutableState<Boolean> = androidx.compose.runtime.mutableStateOf(false),
     val screenshotBlockedIntent: MutableState<String> = androidx.compose.runtime.mutableStateOf(""),
     val skillSaveOverlayState: MutableState<SkillSaveOverlayState> =
@@ -106,9 +112,14 @@ class TaskFlowController(
     private var lastEstimatedCostUsd = 0.0
 
     fun sendTask(text: String) {
-        if (appViewModel.isTaskRunning()) {
-            addSystem("Another task is still running. Stop it first.")
-            onTaskTerminal?.invoke(TaskEvent.Failed("Another task is still running. Stop it first."))
+        if (appViewModel.isTaskRunning() || appViewModel.taskOrchestrator.busyNow()) {
+            val batch = appViewModel.ownerMode() == io.agents.bqaagent.TaskRunMode.BATCH
+            addSystem(
+                activity.getString(
+                    if (batch) R.string.mode_lock_batch_busy else R.string.mode_lock_stopping
+                )
+            )
+            onTaskTerminal?.invoke(TaskEvent.Failed(activity.getString(R.string.mode_lock_stopping)))
             return
         }
 
@@ -407,6 +418,7 @@ class TaskFlowController(
                     cleanupAfterTask()
                 }
                 is TaskEvent.Cancelled -> {
+                    uiState.isTaskStopping.value = false
                     if (uiState.skillSaveOverlayState.value is SkillSaveOverlayState.OfferReplay) {
                         uiState.skillSaveOverlayState.value = SkillSaveOverlayState.Hidden
                     }
@@ -604,9 +616,9 @@ class TaskFlowController(
     }
 
     private fun cleanupAfterTask() {
-        XLog.i(TAG, "cleanupAfterTask: isProcessing=FALSE")
         uiState.isAwaitingReply.value = false
         uiState.isTaskRunning.value = false
+        uiState.isTaskStopping.value = false
         appViewModel.clearTaskCallback()
         activeToolGroupIndex = null
         loopStartedAt.clear()
@@ -1081,5 +1093,16 @@ class TaskFlowController(
         val looksLikeWatchMessages = lower.contains("watch") &&
             (lower.contains("message") || lower.contains("messages") || lower.contains("reply"))
         return mentionsMonitor || looksLikeWatchMessages
+    }
+
+    /**
+     * Called when the user asks to stop. The UI is NOT unlocked here — only marked as stopping. The
+     * authoritative release comes from the terminal event the orchestrator publishes after it has
+     * confirmed the engine and every worker thread have exited (C2).
+     */
+    fun requestStopTask() {
+        if (appViewModel.isStopping()) return
+        uiState.isTaskStopping.value = true
+        appViewModel.stopTask()
     }
 }

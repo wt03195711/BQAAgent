@@ -20,6 +20,13 @@ import androidx.core.os.LocaleListCompat
 
 val appViewModel: AppViewModel by lazy { ClawApplication.appViewModelInstance }
 
+/**
+ * Global read-only accessor for the task-session owner mode. Used by paths that must route to the
+ * Activity of the mode currently owning the engine (notification tap, floating pill) but do not
+ * hold the ViewModel themselves.
+ */
+fun currentTaskOwnerMode(): TaskRunMode = appViewModel.ownerMode()
+
 class ClawApplication : BaseApp() {
 
     companion object {

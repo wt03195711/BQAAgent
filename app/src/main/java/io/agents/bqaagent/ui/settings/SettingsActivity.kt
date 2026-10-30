@@ -22,15 +22,12 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import io.agents.bqaagent.adb.LocalAdbAutomation
-import io.agents.bqaagent.adb.LocalAdbDiscovery
-import io.agents.bqaagent.adb.LocalAdbHostResolver
 import io.agents.bqaagent.adb.LocalAdbPairingNotification
 import io.agents.bqaagent.R
 import io.agents.bqaagent.base.BaseActivity
 import io.agents.bqaagent.widget.AlertDialog
 import io.agents.bqaagent.widget.ConfirmDialog
 import io.agents.bqaagent.widget.CommonToolbar
-import io.agents.bqaagent.widget.LocalAdbSetupDialog
 import io.agents.bqaagent.widget.LoadingDialog
 import io.agents.bqaagent.widget.MenuGroup
 import io.agents.bqaagent.widget.MenuItem
@@ -42,7 +39,6 @@ import io.agents.bqaagent.recording.RecordingSelfTest
 import io.agents.bqaagent.recording.TaskRecordingCoordinator
 import io.agents.bqaagent.recording.TaskRecordingStore
 import io.agents.bqaagent.server.ConfigServerManager
-import io.agents.bqaagent.service.ForegroundService
 import io.agents.bqaagent.support.DebugReportManager
 import io.agents.bqaagent.utils.KVUtils
 import io.agents.bqaagent.utils.XLog
@@ -88,9 +84,6 @@ class SettingsActivity : BaseActivity() {
     private var recordingFilesItem: io.agents.bqaagent.widget.MenuItem? = null
     private var skillDataItem: io.agents.bqaagent.widget.MenuItem? = null
     private var localAdbSetupOpening = false
-    private var localAdbSetupDialog: LocalAdbSetupDialog? = null
-    private var localAdbRefreshOnResume = false
-    private var localAdbRefreshing = false
     private var pendingLocalAdbNotificationPermission = false
 
     private val viewModel by lazy {
@@ -146,7 +139,6 @@ class SettingsActivity : BaseActivity() {
         refreshTaskRecording()
         handler.removeCallbacks(permPoller)
         handler.postDelayed(permPoller, 1000)
-        localAdbRefreshOnResume = false
     }
 
     override fun onPause() {
@@ -873,120 +865,6 @@ class SettingsActivity : BaseActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
         }
         return notificationShown
-    }
-
-    private fun showLocalAdbInputDialog(preset: LocalAdbSetupDialog.Preset) {
-        localAdbSetupDialog = LocalAdbSetupDialog.show(
-            context = this,
-            preset = preset,
-            onOpenWirelessDebugging = {
-                localAdbRefreshOnResume = true
-                showLocalAdbPairingNotification()
-                LocalAdbAutomation.openWirelessDebuggingSettings(this)
-            },
-            onRefreshPorts = {
-                refreshLocalAdbSetupDialog()
-            },
-            onComplete = { form ->
-                lifecycleScope.launch {
-                    permLocalAdb?.setTrailingText("Not Ready")
-                    val result = withContext(Dispatchers.IO) {
-                        val pairingCode = form.pairingCode?.takeIf { it.isNotBlank() }
-                        val pairResult = if (pairingCode != null) {
-                            LocalAdbAutomation.pair(form.ip, form.port, pairingCode)
-                        } else {
-                            null
-                        }
-                        if (pairResult != null && !pairResult.isSuccess) {
-                            return@withContext pairResult
-                        }
-
-                        val connectPort = resolveLocalAdbConnectPort(pairingCode, form)
-                        if (connectPort == null) {
-                            null
-                        } else {
-                            LocalAdbAutomation.configureConnection("127.0.0.1", connectPort)
-                        }
-                    }
-                    refreshPermissions()
-                    if (result?.isSuccess == true) {
-                        Toast.makeText(this@SettingsActivity, R.string.local_adb_setup_success, Toast.LENGTH_LONG).show()
-                    } else {
-                        showLocalAdbSetupError(result)
-                    }
-                    if (result != null && !result.isSuccess) {
-                        XLog.w("SettingsActivity", "Local ADB setup failed: ${result.combinedOutput}")
-                    }
-                }
-            }
-        ).also { dialog ->
-            dialog.setOnDismissListener {
-                if (localAdbSetupDialog === dialog) {
-                    localAdbSetupDialog = null
-                }
-            }
-        }
-    }
-
-    private fun refreshLocalAdbSetupDialog() {
-        val dialog = localAdbSetupDialog ?: return
-        if (localAdbRefreshing) return
-        localAdbRefreshing = true
-        Toast.makeText(this, R.string.local_adb_detecting, Toast.LENGTH_SHORT).show()
-        lifecycleScope.launch {
-            try {
-                val preset = withContext(Dispatchers.IO) {
-                    buildLocalAdbSetupPreset(LocalAdbDiscovery.discoverBlocking(this@SettingsActivity))
-                }
-                dialog.updatePreset(preset)
-                Toast.makeText(
-                    this@SettingsActivity,
-                    if (preset.port != null) R.string.local_adb_ports_refreshed else R.string.local_adb_ports_not_found,
-                    Toast.LENGTH_SHORT
-                ).show()
-            } finally {
-                localAdbRefreshing = false
-            }
-        }
-    }
-
-    private fun buildLocalAdbSetupPreset(discovery: LocalAdbDiscovery.Result): LocalAdbSetupDialog.Preset {
-        val connectPort = discovery.connectPort
-        val visiblePort = discovery.pairPort ?: discovery.connectPort
-        return LocalAdbSetupDialog.Preset(
-            ip = LocalAdbHostResolver.defaultPairingHost(this),
-            port = visiblePort,
-            connectPort = connectPort,
-            portIsPairingPort = discovery.pairPort != null,
-        )
-    }
-
-    private fun defaultLocalAdbSetupPreset(): LocalAdbSetupDialog.Preset {
-        return LocalAdbSetupDialog.Preset(ip = LocalAdbHostResolver.defaultPairingHost(this))
-    }
-
-    private fun resolveLocalAdbConnectPort(
-        pairingCode: String?,
-        form: LocalAdbSetupDialog.Result,
-    ): Int? {
-        if (pairingCode == null) {
-            val isUnchangedPairingPort = form.portIsPairingPort && form.portMatchesPreset
-            return if (isUnchangedPairingPort) form.connectPort ?: form.port else form.port
-        }
-        return form.connectPort
-            ?: LocalAdbDiscovery.discoverBlocking(this, timeoutMs = 7_000L).connectPort
-    }
-
-    private fun showLocalAdbSetupError(result: io.agents.bqaagent.adb.ShellCommandResult?) {
-        val message = result?.combinedOutput
-            ?.ifBlank { null }
-            ?: getString(R.string.local_adb_connect_port_missing)
-        AlertDialog.show(
-            context = this,
-            title = getString(R.string.local_adb_setup_failed),
-            message = message,
-            actionTitle = getString(R.string.common_confirm),
-        )
     }
 
     private fun initMenuGroups() {

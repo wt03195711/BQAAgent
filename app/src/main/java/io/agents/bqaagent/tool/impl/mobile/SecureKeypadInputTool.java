@@ -6,6 +6,7 @@ package io.agents.bqaagent.tool.impl.mobile;
 import android.graphics.Rect;
 import android.view.KeyEvent;
 
+import io.agents.bqaagent.adb.LocalAdbAutomation;
 import io.agents.bqaagent.adb.LocalAdbDeviceDriver;
 import io.agents.bqaagent.adb.UiNode;
 import io.agents.bqaagent.tool.BaseTool;
@@ -75,12 +76,16 @@ public class SecureKeypadInputTool extends BaseTool {
         }
         String layout = optionalString(params, "layout", "auto").trim().toLowerCase(Locale.ROOT);
         boolean submitAfterEntry = optionalBoolean(params, "submit_after_entry", false);
-        int postWaitMs = Math.max(1500, Math.min(optionalInt(params, "post_wait_ms", 9000), 15000));
+        int postWaitMs = Math.max(1500, Math.min(optionalInt(params, "post_wait_ms", 4000), 15000));
 
         focusSecureField(driver);
         clearFocusedSecureInput(driver);
 
-        if (!"standard_3x4".equals(layout)) {
+        // focusSecureField 内部已调用 detectCustomKeypad 并缓存到节点扫描中，
+        // 这里复用同一份 currentMappedNodes 再次确认（内存操作，无 dump 成本）
+        boolean skipKeyEvents = "standard_3x4".equals(layout) || detectCustomKeypad(driver);
+
+        if (!skipKeyEvents) {
             if (!typeDigitsWithKeyEvents(driver, digits)) {
                 return ToolResult.error("Failed to enter secure keypad digits with Android numeric key events.");
             }
@@ -96,12 +101,7 @@ public class SecureKeypadInputTool extends BaseTool {
                             " secure keypad digit(s) using key_events and tapped the enabled login action. Post-entry state=" + submittedState + ".");
                 }
             }
-
-            focusSecureField(driver);
             clearFocusedSecureInput(driver);
-        }
-
-        if (!"standard_3x4".equals(layout)) {
             driver.getScreenTree("actionable");
         }
 
@@ -109,20 +109,24 @@ public class SecureKeypadInputTool extends BaseTool {
                 ? new HashMap<>()
                 : inferClickableGridFromCache(driver);
 
+        Map<Character, int[]> digitCoords = "standard_3x4".equals(layout)
+                ? new HashMap<>()
+                : batchResolveDigitCoordinates(driver, digits);
+
+        // 构建 tap 列表
+        List<int[]> tapSequence = new ArrayList<>();
         int entered = 0;
         String method = "visible_nodes";
         for (char digit : digits.toCharArray()) {
             int[] xy;
             if ("standard_3x4".equals(layout)) {
                 xy = null;
-            } else if (entered == 0) {
-                xy = findDigitCoordinates(driver, digit);
             } else {
-                xy = findDigitCoordinatesFromCache(driver, digit);
-            }
-            if (xy == null) {
-                xy = inferredGrid.get(digit);
-                method = "inferred_grid";
+                xy = digitCoords.get(digit);
+                if (xy == null) {
+                    xy = inferredGrid.get(digit);
+                    method = "inferred_grid";
+                }
             }
             if (xy == null) {
                 xy = standardCoordinates(digit);
@@ -132,11 +136,13 @@ public class SecureKeypadInputTool extends BaseTool {
 
             String boundsError = validateCoordinates(xy[0], xy[1]);
             if (boundsError != null) return ToolResult.error(boundsError);
-            if (!driver.performTap(xy[0], xy[1])) {
-                return ToolResult.error("Failed to tap secure keypad digit #" + (entered + 1) + " with " + method);
-            }
+            tapSequence.add(xy);
             entered++;
-            sleep(150);
+        }
+
+        // 优化：将多次 tap 合并为一条 shell 命令，减少 ADB 往返
+        if (!batchPerformTaps(driver, tapSequence)) {
+            return ToolResult.error("Failed to tap secure keypad digits with " + method);
         }
         driver.invalidateScreenCache();
 
@@ -153,8 +159,22 @@ public class SecureKeypadInputTool extends BaseTool {
     }
 
     private void clearFocusedSecureInput(LocalAdbDeviceDriver driver) {
+        // 只有当焦点是可编辑的 EditText 且当前文本非空时才清除；
+        // 触屏键盘场景（无 EditText 焦点）下 clearFocusedText 完全无效且浪费 1.5s。
+        if (!hasEditableFocusedNode(driver)) return;
         driver.clearFocusedText(12);
-        sleep(180);
+        sleep(150);
+    }
+
+    private boolean hasEditableFocusedNode(LocalAdbDeviceDriver driver) {
+        for (UiNode node : driver.currentMappedNodes()) {
+            if (!node.getFocused()) continue;
+            if (node.isEditable()) {
+                String text = node.getText();
+                if (text != null && !text.isEmpty()) return true;
+            }
+        }
+        return false;
     }
 
     private boolean typeDigitsWithKeyEvents(LocalAdbDeviceDriver driver, String digits) {
@@ -181,6 +201,9 @@ public class SecureKeypadInputTool extends BaseTool {
             String focusedLabel = normalized(node.getText() + " " + node.getContentDescription() + " " + node.getResourceId());
             if (focusedLabel.contains("pin")) return;
         }
+
+        // 自绘键盘无需 focus tap：若屏幕下半区已有 ≥3 个可点击数字节点，直接返回
+        if (detectCustomKeypad(driver)) return;
 
         UiNode best = null;
         int bestScore = 0;
@@ -250,6 +273,55 @@ public class SecureKeypadInputTool extends BaseTool {
         return new int[]{best.getCenterX(), best.getCenterY()};
     }
 
+    /**
+     * 优化：批量解析所有数字坐标，复用同一份缓存，避免逐字 refresh dump。
+     */
+    private Map<Character, int[]> batchResolveDigitCoordinates(LocalAdbDeviceDriver driver, String digits) {
+        Map<Character, int[]> result = new HashMap<>();
+        int[] size = getScreenSize();
+        List<UiNode> nodes = driver.currentMappedNodes();
+        if (nodes.isEmpty()) {
+            try { driver.getScreenTree("actionable"); } catch (Exception ignored) {}
+            nodes = driver.currentMappedNodes();
+        }
+        for (char digit : digits.toCharArray()) {
+            if (result.containsKey(digit)) continue;
+            UiNode best = null;
+            String query = String.valueOf(digit);
+            for (UiNode node : nodes) {
+                if (!io.agents.bqaagent.utils.UiTextMatchUtils.matchesExactOrNormalized(node.getText(), query)
+                        && !io.agents.bqaagent.utils.UiTextMatchUtils.matchesExactOrNormalized(node.getContentDescription(), query)) continue;
+                if (!isKeypadCandidate(node, size)) continue;
+                int score = node.getClickable() ? 2 : 1;
+                if (best == null || score > (best.getClickable() ? 2 : 1)) best = node;
+            }
+            if (best != null) {
+                result.put(digit, new int[]{best.getCenterX(), best.getCenterY()});
+            }
+        }
+        if (result.size() < countDistinctDigits(digits)) {
+            for (char digit : digits.toCharArray()) {
+                if (result.containsKey(digit)) continue;
+                List<UiNode> fallback = driver.findNodesByText(String.valueOf(digit), false);
+                if (!fallback.isEmpty()) {
+                    int[] size2 = getScreenSize();
+                    UiNode best = fallback.stream()
+                            .filter(node -> isKeypadCandidate(node, size2))
+                            .max(Comparator.comparingInt(node -> node.getClickable() ? 2 : 1))
+                            .orElse(null);
+                    if (best != null) {
+                        result.put(digit, new int[]{best.getCenterX(), best.getCenterY()});
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    private int countDistinctDigits(String digits) {
+        return (int) digits.chars().distinct().count();
+    }
+
     private Map<Character, int[]> inferClickableGridFromCache(LocalAdbDeviceDriver driver) {
         Map<Character, int[]> result = new HashMap<>();
 
@@ -289,8 +361,49 @@ public class SecureKeypadInputTool extends BaseTool {
         return result;
     }
 
+    /**
+     * 判断当前屏幕是否为自绘数字键盘（触屏专用），若是则 KeyEvent 无意义。
+     * 判据：屏幕下半区域存在 >=3 个 clickable 且标签为单个数字的节点。
+     */
+    private boolean detectCustomKeypad(LocalAdbDeviceDriver driver) {
+        int[] size = getScreenSize();
+        int digitNodes = 0;
+        for (UiNode node : driver.currentMappedNodes()) {
+            if (!node.getClickable() || !node.getEnabled()) continue;
+            Rect bounds = node.getBounds();
+            if (bounds == null || bounds.width() <= 0 || bounds.height() <= 0) continue;
+            if (node.getCenterY() < size[1] * 0.42f) continue;
+            String label = node.getText();
+            if (label.length() != 1 || !Character.isDigit(label.charAt(0))) {
+                String desc = node.getContentDescription();
+                if (desc.length() != 1 || !Character.isDigit(desc.charAt(0))) continue;
+            }
+            digitNodes++;
+            if (digitNodes >= 3) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 将多个 tap 操作合并为一条 shell 命令执行，减少 ADB 往返开销。
+     * 单次往返 ~0.3s vs N 次往返 ~N×0.3s。
+     * 每个 tap 之间仍保留 150ms 间隔给 App 注册。
+     */
+    private boolean batchPerformTaps(LocalAdbDeviceDriver driver, List<int[]> taps) {
+        if (taps.isEmpty()) return true;
+        if (taps.size() == 1) {
+            return driver.performTap(taps.get(0)[0], taps.get(0)[1]);
+        }
+        StringBuilder cmd = new StringBuilder();
+        for (int i = 0; i < taps.size(); i++) {
+            if (i > 0) cmd.append(" && sleep 0.15 && ");
+            cmd.append("input tap ").append(taps.get(i)[0]).append(" ").append(taps.get(i)[1]);
+        }
+        return LocalAdbAutomation.exec(cmd.toString(), 10_000L).isSuccess();
+    }
+
     private boolean tapPostPinLoginActionIfVisible(LocalAdbDeviceDriver driver) {
-        sleep(450);
+        sleep(200);
         try { driver.getScreenTree("actionable"); } catch (Exception ignored) {}
         int[] size = getScreenSize();
         UiNode best = null;
@@ -327,21 +440,28 @@ public class SecureKeypadInputTool extends BaseTool {
         }
         if (best == null) return false;
         boolean tapped = driver.performTap(best.getCenterX(), best.getCenterY());
-        if (tapped) sleep(600);
+        if (tapped) sleep(300);
         return tapped;
     }
 
     private SecureLoginState waitForPostPinState(LocalAdbDeviceDriver driver, long maxWaitMs) {
         long deadline = System.currentTimeMillis() + maxWaitMs;
         SecureLoginState last = SecureLoginState.OTHER;
-        long interval = 500;
+        long interval = 400;
         while (System.currentTimeMillis() <= deadline) {
+            // 状态轮询必须读到最新屏幕，主动作废 2s 缓存
+            driver.invalidateScreenCache();
             last = detectSecureLoginState(driver);
-            if (last == SecureLoginState.OTHER || last == SecureLoginState.LOGIN_BUTTON) return last;
+            // OTHER / LOGIN_BUTTON / LOADING 都视为"已推进"，立即返回
+            if (last == SecureLoginState.OTHER
+                    || last == SecureLoginState.LOGIN_BUTTON
+                    || last == SecureLoginState.LOADING) {
+                return last;
+            }
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) break;
             sleep(Math.min(interval, remaining));
-            interval = Math.min(interval + 200, 2000);
+            interval = Math.min(interval + 300, 1500);
         }
         return last;
     }

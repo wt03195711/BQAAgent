@@ -54,6 +54,11 @@ public class TapTool extends BaseTool {
         int y = requireInt(params, "y");
         String boundsError = validateCoordinates(x, y);
         if (boundsError != null) return ToolResult.error(boundsError);
+        // Pre-flight: if the target sits under the floating pill, tell the LLM why and
+        // stop it from retry-looping on an apparently dead tap. performTap also guards
+        // this defensively; the pre-flight is only to produce a richer message.
+        String overlayMsg = driver.overlayBlockedMessage(x, y, "tap");
+        if (overlayMsg != null) return ToolResult.error(overlayMsg);
         boolean success = driver.performTap(x, y);
         return success ? ToolResult.success("Tapped at (" + x + ", " + y + ")")
                 : ToolResult.error("Failed to tap at (" + x + ", " + y + ")");

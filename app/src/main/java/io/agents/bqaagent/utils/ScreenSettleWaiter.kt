@@ -3,6 +3,7 @@
 package io.agents.bqaagent.utils
 
 import io.agents.bqaagent.ClawApplication
+import io.agents.bqaagent.adb.LocalAdbAutomation
 import io.agents.bqaagent.adb.LocalAdbDeviceDriver
 import io.agents.bqaagent.utils.XLog
 
@@ -52,6 +53,7 @@ object ScreenSettleWaiter {
      * detection).
      */
     private const val NO_CHANGE_WAIT_MS = 2_000L
+    private const val SCREENCAP_TIMEOUT_MS = 3_000L
 
     /**
      * Snapshot the current screen fingerprint BEFORE executing an action. Pass
@@ -59,15 +61,13 @@ object ScreenSettleWaiter {
      * require the screen to actually change relative to this baseline.
      */
     @JvmStatic
-    fun captureBaseline(): String = sampleScreenFingerprint()
+    @JvmOverloads
+    fun captureBaseline(reuseFreshCache: Boolean = false): String =
+        screenFingerprint(reuseFreshCache)
 
     /**
      * Wait until the screen after [toolName] is ready. Never throws; on timeout
      * it proceeds with whatever screen is present. Returns true if settled.
-     *
-     * @param baselineFingerprint pre-action fingerprint from [captureBaseline];
-     *        empty skips the change gate (legacy behavior).
-     * @param budgetMs maximum time to spend in fingerprint sampling.
      */
     @JvmStatic
     @JvmOverloads
@@ -81,7 +81,25 @@ object ScreenSettleWaiter {
             waitForForegroundLeaveSelf(isCancelled)
             if (isCancelled()) return false
         }
-        return waitForScreenFingerprintSettle(baselineFingerprint, budgetMs, isCancelled)
+        val settled = waitForScreenFingerprintSettle(
+            baselineFingerprint,
+            budgetMs,
+            isCancelled
+        )
+        // The stability loop uses a cheap screencap fingerprint and no longer reads the
+        // uiautomator tree per sample, so do exactly ONE authoritative tree read here to
+        // keep the on-exit contract: the cache holds a fresh, stable screen tree that the
+        // caller's verify / node resolve (replay) and anchor capture (recording) reuse
+        // with zero extra dumps. Skipped when the task was cancelled.
+        if (!isCancelled()) {
+            try {
+                LocalAdbDeviceDriver.invalidateScreenCache()
+                LocalAdbDeviceDriver.getScreenTree()
+            } catch (e: Exception) {
+                XLog.w(TAG, "Authoritative tree read failed: ${e.javaClass.simpleName}")
+            }
+        }
+        return settled
     }
 
     private fun waitForForegroundLeaveSelf(isCancelled: () -> Boolean) {
@@ -133,12 +151,8 @@ object ScreenSettleWaiter {
         var lastFingerprint = ""
         var samples = 0
 
-        // Stage 1 (baseline only): did the action change the screen at all?
-        // Unchanged → short fixed wait, then one re-check: still unchanged means
-        // there is nothing to wait for; changed during the wait means a late
-        // transition started and stability detection takes over in stage 2.
         if (baselineFingerprint.isNotEmpty()) {
-            val fingerprint = sampleScreenFingerprint()
+            val fingerprint = screenFingerprint()
             samples++
             if (fingerprint == baselineFingerprint) {
                 try {
@@ -155,7 +169,7 @@ object ScreenSettleWaiter {
                     XLog.w(TAG, "Screen settle budget exhausted during no-change wait (${System.currentTimeMillis() - startedAt}ms), proceeding anyway")
                     return false
                 }
-                val recheck = sampleScreenFingerprint()
+                val recheck = screenFingerprint()
                 samples++
                 if (recheck == baselineFingerprint) {
                     XLog.i(TAG, "Screen unchanged vs baseline after ${NO_CHANGE_WAIT_MS}ms wait (${System.currentTimeMillis() - startedAt}ms total): action did not visibly change the screen")
@@ -169,13 +183,12 @@ object ScreenSettleWaiter {
             }
         }
 
-        // Stage 2: wait until the screen stops changing.
         while (System.currentTimeMillis() < deadline) {
             if (isCancelled()) {
                 XLog.i(TAG, "Screen settle interrupted by cancellation")
                 return false
             }
-            val fingerprint = sampleScreenFingerprint()
+            val fingerprint = screenFingerprint()
             samples++
             if (samples >= 2 && fingerprint == lastFingerprint) {
                 XLog.i(TAG, "Screen settled after $samples samples (${System.currentTimeMillis() - startedAt}ms)")
@@ -194,25 +207,76 @@ object ScreenSettleWaiter {
     }
 
     /**
-     * Fingerprint = foreground package/activity + hash of the screen tree body.
-     * The first tree line is dropped because it contains an incrementing snapshot
-     * id (snapshot=sXX), which would make every fingerprint differ. Cache is
-     * invalidated first so each sample is a genuine fresh dump; the final stable
-     * sample stays in cache and is reused by the subsequent screen capture.
+     * Fingerprint used ONLY as the fallback signal: foreground package/activity +
+     * hash of the uiautomator tree body. Costs ~2s per call (a full dump), so it is
+     * now only used when screencap hashing is unavailable on the device. Tree
+     * fingerprints are returned WITHOUT the "shot:" prefix, so a mid-run switch
+     * between the two signals can never falsely compare equal (it only makes
+     * samples differ, i.e. the conservative direction).
      */
-    private fun sampleScreenFingerprint(): String {
+    private fun sampleScreenFingerprint(reuseFreshCache: Boolean = false): String {
         val foreground = try {
-            "${LocalAdbDeviceDriver.foregroundPackageName()}/${LocalAdbDeviceDriver.activeActivityName()}"
+            val (pkg, act) = LocalAdbDeviceDriver.foregroundPackageAndActivity()
+            "$pkg/$act"
         } catch (_: Exception) {
             ""
         }
         return try {
-            LocalAdbDeviceDriver.invalidateScreenCache()
+            if (!reuseFreshCache) {
+                LocalAdbDeviceDriver.invalidateScreenCache()
+            }
             val tree = LocalAdbDeviceDriver.getScreenTree() ?: ""
             val body = tree.lineSequence().drop(1).joinToString("\n")
             "$foreground#${body.hashCode()}"
         } catch (e: Exception) {
             "$foreground#error:${e.javaClass.simpleName}"
+        }
+    }
+
+    @Volatile
+    private var screencapUnavailable = false
+
+    /**
+     * Primary stability fingerprint: foreground package/activity + a device-side
+     * md5 of a screencap (pixels). ~160-300ms per sample vs ~2000ms for a uiautomator
+     * tree read, which is what made every settle cost 4-8s. Pixels are the right
+     * "did the screen change / stop changing" proxy and also stay sensitive to
+     * FLAG_SECURE surfaces (a constant black capture simply compares equal). If the
+     * device lacks screencap/md5sum, this sticky-switches to the tree signal for all
+     * subsequent samples so correctness is preserved at the cost of speed.
+     */
+    private fun screenFingerprint(reuseFreshCache: Boolean = false): String {
+        if (screencapUnavailable) {
+            return sampleScreenFingerprint(reuseFreshCache)
+        }
+        val foreground = try {
+            val (pkg, act) = LocalAdbDeviceDriver.foregroundPackageAndActivity()
+            "$pkg/$act"
+        } catch (_: Exception) {
+            ""
+        }
+        val hash = screenshotHash()
+        if (hash == null) {
+            screencapUnavailable = true
+            XLog.w(TAG, "screencap fingerprint unavailable; falling back to uiautomator tree fingerprint for all samples")
+            return sampleScreenFingerprint(reuseFreshCache)
+        }
+        return "shot:$foreground#$hash"
+    }
+
+    private val MD5_HEX = Regex("^[0-9a-fA-F]{32}$")
+
+    private fun screenshotHash(): String? {
+        return try {
+            val out = LocalAdbAutomation
+                .exec("screencap -p | md5sum", SCREENCAP_TIMEOUT_MS)
+                .stdout
+                .trim()
+                .substringBefore(' ')
+                .trim()
+            if (out.matches(MD5_HEX)) out else null
+        } catch (e: Exception) {
+            null
         }
     }
 }

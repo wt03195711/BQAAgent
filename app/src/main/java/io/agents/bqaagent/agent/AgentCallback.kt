@@ -51,4 +51,25 @@ interface AgentCallback {
      * @return true if the user approved, false if denied/timed out
      */
     fun onSensitiveConfirm(round: Int, actionSummary: String, riskType: String, timeoutMs: Long): Boolean = true
+
+    /**
+     * Session liveness probe (C3). The orchestrator owns the task session; when it is released,
+     * cancelled or handed to another run, every in-flight loop must treat the current task as dead
+     * and stop before touching the device again.
+     *
+     * Deliberately independent of DefaultAgentService's own `cancelled` flag: that flag is reset at
+     * the start of a run, so a cancel that lands while the run is being submitted would otherwise be
+     * erased and the loop would resurrect with no owner left able to stop it.
+     *
+     * Default false keeps non-UI callers (tests, channels, skills) behaving exactly as before.
+     */
+    fun isSessionCancelled(): Boolean = false
+
+    /**
+     * Fired from the executeTask finally EVERY time the engine clears its running flag — including
+     * when cancellation suppresses the terminal callback. Consumers that publish liveness (the
+     * orchestrator) must use this to republish `busy`; without it a cancelled loop's exit is
+     * unobservable and the cross-mode gate freezes on a stale "busy" forever.
+     */
+    fun onEngineSettled() {}
 }

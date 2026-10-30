@@ -187,8 +187,36 @@ class ForegroundService : Service() {
             }
         }
 
+        /**
+         * Route the notification tap to the screen of the mode that owns the running task:
+         * a batch run opens BatchActivity (CLEAR_TOP pops the chat underneath it), a chat task
+         * opens the chatroom. When nothing is running, fall back to the cold-start restore marker
+         * so the tap lands where the user last left the app.
+         */
+        private fun foregroundTarget(context: Context): Class<*> {
+            val owner = runCatching { io.agents.bqaagent.currentTaskOwnerMode() }.getOrNull()
+            return when (owner) {
+                io.agents.bqaagent.TaskRunMode.BATCH ->
+                    io.agents.bqaagent.ui.batch.BatchActivity::class.java
+                io.agents.bqaagent.TaskRunMode.CHAT ->
+                    io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java
+                else -> when (io.agents.bqaagent.utils.KVUtils.getLastUiMode()) {
+                    io.agents.bqaagent.ui.batch.BatchUiMode.BATCH ->
+                        io.agents.bqaagent.ui.batch.BatchActivity::class.java
+                    else -> io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java
+                }
+            }
+        }
+
         private fun buildNotification(context: Context, title: String, text: String): Notification {
-            val intent = Intent(context, io.agents.bqaagent.ui.chat.ComposeChatActivity::class.java)
+            // Deliberately NOT a constant: the mode owning the session changes over the run, and
+            // every updateTaskStatus/resetToIdle rebuilds this notification, so the tap target
+            // tracks the live owner instead of always landing on chat.
+            val intent = Intent(context, foregroundTarget(context)).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
             val pendingIntent = PendingIntent.getActivity(
                 context,
                 0,

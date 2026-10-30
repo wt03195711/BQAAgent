@@ -15,6 +15,7 @@ import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
@@ -211,6 +212,9 @@ class ComposeChatActivity : ComponentActivity() {
     private val _permissionBannerText = mutableStateOf<String?>(null)
     private val _isAwaitingReply = mutableStateOf(false)
     private val _isTaskRunning = mutableStateOf(false)
+    private val _isTaskStopping = mutableStateOf(false)
+    private val _otherModeBusy = mutableStateOf(false)
+    private val _batchOwnsWorkspace = mutableStateOf(false)
     private val _inputEnabled =
         mutableStateOf(true)    // False when model not ready (no task running)
     private val _conversations = mutableStateListOf<ChatHistoryManager.ConversationSummary>()
@@ -260,6 +264,8 @@ class ComposeChatActivity : ComponentActivity() {
                 modelStatus = _modelStatus,
                 isAwaitingReply = _isAwaitingReply,
                 isTaskRunning = _isTaskRunning,
+                // Same instance the Compose gate observes, so requestStopTask() actually locks the UI.
+                isTaskStopping = _isTaskStopping,
             ),
             onPersistConversation = { saveChat() },
             onTaskSettled = { deferLocalChatBootstrapForAutoTask = false },
@@ -268,7 +274,9 @@ class ComposeChatActivity : ComponentActivity() {
     }
 
     private val activeTaskShellController by lazy {
-        ActiveTaskShellController(appViewModel = appViewModel)
+        ActiveTaskShellController(appViewModel = appViewModel).apply {
+            onTaskStopRequested = { taskFlowController.requestStopTask() }
+        }
     }
 
     /**
@@ -316,6 +324,9 @@ class ComposeChatActivity : ComponentActivity() {
                     permissionBannerText = _permissionBannerText.value,
                     isAwaitingReply = _isAwaitingReply.value,
                     isTaskRunning = _isTaskRunning.value,
+                    // Confirmed-stop gate: true until the orchestrator proves the loop has exited.
+                    isTaskStopping = _isTaskStopping.value,
+                    otherModeBusy = _otherModeBusy.value && _batchOwnsWorkspace.value,
                     inputEnabled = _inputEnabled.value,
                     isDownloading = _isDownloading.value,
                     downloadProgress = _downloadProgress.value,
@@ -859,6 +870,21 @@ class ComposeChatActivity : ComponentActivity() {
             keyguardLock?.reenableKeyguard()
             keyguardLock = null
             XLog.d(TAG, "Keep-alive disabled")
+        }
+    }
+
+    init {
+        lifecycleScope.launch {
+            appViewModel.taskBusy.collect { busy ->
+                _otherModeBusy.value = busy
+                _batchOwnsWorkspace.value = appViewModel.ownerMode() ==
+                        io.agents.bqaagent.TaskRunMode.BATCH
+                // A foreign-mode run finishing must not leave the chat gate stuck.
+                if (!busy && appViewModel.ownerMode() == io.agents.bqaagent.TaskRunMode.NONE) {
+                    _isTaskStopping.value = false
+                    _isTaskRunning.value = false
+                }
+            }
         }
     }
 }

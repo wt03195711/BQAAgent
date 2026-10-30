@@ -13,6 +13,13 @@ object SkillGovernor {
     private const val MIN_EXECUTIONS_FOR_RATE_CHECK = 3
     private const val SUCCESS_RATE_THRESHOLD = 0.50
 
+    /**
+     * Verification uncertainty gets a looser breaker than a real tool failure: the recorded
+     * screen is compared against content that legitimately changes between runs, so two misses
+     * in a row must not retire a working template.
+     */
+    private const val VERIFICATION_CIRCUIT_CONSECUTIVE_FAILS = 4
+
     fun recordTemplateSuccess(template: ExecutionTemplate) {
         val updated = template.copy(
             executionCount = template.executionCount + 1,
@@ -53,6 +60,33 @@ object SkillGovernor {
                     "${updated.successCount}/$newExecutionCount success rate below $SUCCESS_RATE_THRESHOLD")
             else -> XLog.d(TAG, "Template ${template.templateId} failure recorded at step $key " +
                     "($newCount/$QUICK_CIRCUIT_CONSECUTIVE_FAILS)")
+        }
+    }
+
+    /**
+     * Record a step that executed fine but could not be verified against the recorded screen.
+     * Kept separate from [recordTemplateFailure] on purpose: it never trips the success-rate
+     * breaker, needs four consecutive misses at the same step to mark a template unavailable,
+     * and uses its own key prefix so verification and execution misses cannot stack each other's
+     * consecutive counters. Statistics stay visible for the UI's "consider re-recording" badge.
+     */
+    fun recordVerificationFailure(template: ExecutionTemplate, failedStepIndex: Int, failedToolName: String) {
+        val key = "verify:$failedStepIndex:$failedToolName"
+        val newCount = if (template.lastFailedStepKey == key) template.consecutiveFailCount + 1 else 1
+        val circuitBroken = newCount >= VERIFICATION_CIRCUIT_CONSECUTIVE_FAILS
+        val updated = template.copy(
+            executionCount = template.executionCount + 1,
+            lastUsedMs = System.currentTimeMillis(),
+            lastFailedStepKey = key,
+            consecutiveFailCount = newCount,
+            isAvailable = template.isAvailable && !circuitBroken
+        )
+        SkillStore.updateTemplate(updated)
+        when {
+            circuitBroken -> XLog.w(TAG, "Template ${template.templateId} verification-circuit-broken: " +
+                    "$newCount consecutive unverifiable runs at step $key")
+            else -> XLog.d(TAG, "Template ${template.templateId} verification uncertainty at step $key " +
+                    "($newCount/$VERIFICATION_CIRCUIT_CONSECUTIVE_FAILS)")
         }
     }
 

@@ -113,6 +113,7 @@ import io.agents.bqaagent.agent.skill.SkillDefinition
 import io.agents.bqaagent.agent.skill.SkillMatcher
 import io.agents.bqaagent.ui.chat.ChatHistoryManager
 import io.agents.bqaagent.ui.chat.ChatMessage
+import io.agents.bqaagent.ui.chat.CopyableMessageContainer
 import io.agents.bqaagent.ui.chat.PokeclawColors
 import io.agents.bqaagent.ui.chat.SkillReplayPreviewCard
 import io.agents.bqaagent.ui.chat.ToolStep
@@ -175,9 +176,27 @@ fun BatchRoot(
     // re-sorts with the just-opened batch at the top — matching chat's most-recently-accessed order.
     var sidebarReload by remember { mutableStateOf(0) }
 
+    // Resolve context + lock hint in composition scope: BackHandler's lambda is a plain
+    // () -> Unit where @Composable calls (LocalContext.current, stringResource) are illegal.
+    val activityContext = LocalContext.current
+    val batchLockHint = activityContext.getString(R.string.mode_lock_batch_running_locked)
+
     BackHandler {
+        // Only the WORKSPACE -> onExit() path switches modes (returns to chat); that is the one
+        // to lock while a run owns the engine. DETAIL -> WORKSPACE is intra-batch navigation and
+        // must stay allowed so users can back out of a live task transcript mid-run.
         when (screen) {
-            BatchScreen.WORKSPACE -> onExit()
+            BatchScreen.WORKSPACE -> {
+                if (batchActive) {
+                    android.widget.Toast.makeText(
+                        activityContext,
+                        batchLockHint,
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                } else {
+                    onExit()
+                }
+            }
             BatchScreen.DETAIL -> screen = BatchScreen.WORKSPACE
         }
     }
@@ -220,6 +239,7 @@ fun BatchRoot(
                     colors = colors,
                     onMenu = { scope.launch { drawerState.open() } },
                     onSwitchToChat = onExit,
+                    switchEnabled = !batchActive,
                     onSettings = onOpenSettings,
                 )
             },
@@ -566,6 +586,7 @@ private fun BatchTopBar(
     colors: PokeclawColors,
     onMenu: () -> Unit,
     onSwitchToChat: () -> Unit,
+    switchEnabled: Boolean = true,
     onSettings: () -> Unit,
 ) {
     Column {
@@ -587,15 +608,22 @@ private fun BatchTopBar(
                 }
             },
             actions = {
-                TextButton(onClick = onSwitchToChat) {
+                TextButton(
+                    onClick = onSwitchToChat,
+                    enabled = switchEnabled,
+                ) {
                     Icon(
                         Icons.Default.Forum,
                         contentDescription = null,
-                        tint = colors.textSecondary,
+                        tint = if (switchEnabled) colors.textSecondary else colors.textTertiary.copy(alpha = 0.4f),
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(Modifier.width(4.dp))
-                    Text(stringResource(R.string.batch_tab_chat), fontSize = 13.sp, color = colors.textSecondary)
+                    Text(
+                        stringResource(R.string.batch_tab_chat),
+                        fontSize = 13.sp,
+                        color = if (switchEnabled) colors.textSecondary else colors.textTertiary.copy(alpha = 0.4f),
+                    )
                 }
                 IconButton(onClick = onSettings) {
                     Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.batch_cd_settings), tint = colors.textSecondary)
@@ -895,6 +923,9 @@ fun BatchWorkspace(
 
     val active by vm.runActive.collectAsState()
     val cancelling by vm.cancelling.collectAsState()
+    // Cross-mode gate (C1 UI half): a chat task owning the workspace must disable Start/Continue here.
+    val chatBusy by vm.chatModeBlocked.collectAsState()
+    val stopStalled by vm.stopStalled.collectAsState()
 
     var showAddDialog by remember { mutableStateOf(false) }
     var showSkillPicker by remember { mutableStateOf(false) }
@@ -972,7 +1003,16 @@ fun BatchWorkspace(
             // ---- 4. Progress bar (between settings and Start) ----
             BatchProgressSection(queue = queue, runState = runState, colors = colors)
 
-            // ---- c. Start / Continue / Cancel ----
+            stopStalled?.let {
+                Text(
+                    text = it,
+                    color = ErrRed,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 6.dp),
+                )
+            }
+
+            // ---- c. Start / Continue / Cancel ---
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -999,14 +1039,25 @@ fun BatchWorkspace(
                             continueMode = false
                             if (hasResults) showRerunConfirm = true else showPrecheck = true
                         },
-                        enabled = queue.isNotEmpty(),
+                        enabled = queue.isNotEmpty() && !chatBusy,
                         colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
                         modifier = Modifier.weight(1f).height(48.dp),
-                    ) { Text(stringResource(if (hasResults) R.string.batch_start_over else R.string.batch_start), fontSize = 15.sp) }
+                    ) {
+                        Text(
+                            stringResource(
+                                when {
+                                    chatBusy -> R.string.mode_lock_chat_busy
+                                    hasResults -> R.string.batch_start_over
+                                    else -> R.string.batch_start
+                                }
+                            ),
+                            fontSize = 15.sp,
+                        )
+                    }
                     if (resumable) {
                         Button(
                             onClick = { continueMode = true; showPrecheck = true },
-                            enabled = queue.isNotEmpty(),
+                            enabled = queue.isNotEmpty() && !chatBusy,
                             colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
                             modifier = Modifier.weight(1f).height(48.dp),
                         ) { Text(stringResource(R.string.batch_continue), fontSize = 15.sp) }
@@ -1602,8 +1653,22 @@ fun BatchDetailScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    val messages by produceState<List<ChatMessage>?>(initialValue = null, key1 = taskIndex) {
-        value = withContext(Dispatchers.IO) {
+    val runState by vm.runState.collectAsState()
+    val liveTranscript by vm.liveTaskTranscript.collectAsState()
+    // True while the task whose detail is open is the one the driver is executing right now.
+    val liveRunning = taskIndex != null &&
+            runState?.running == true &&
+            runState?.currentIndex == taskIndex &&
+            liveTranscript.isNotEmpty()
+    val messages by produceState<List<ChatMessage>?>(
+        initialValue = null,
+        key1 = taskIndex,
+        key2 = if (liveRunning) 1 else 0,
+    ) {
+        // Outside a live run of THIS task: read the persisted/folded span exactly as before. During a
+        // live run the disk span is only written when the task settles, so skip the file read and let
+        // the driver's in-flight transcript render below.
+        value = if (liveRunning) null else withContext(Dispatchers.IO) {
             if (taskIndex == null) emptyList() else vm.taskMessages(taskIndex)
         }
     }
@@ -1620,7 +1685,7 @@ fun BatchDetailScreen(
         }
         HorizontalDivider(color = colors.divider)
 
-        val data = messages
+        val data = if (liveRunning) liveTranscript else messages
         when {
             data == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = colors.accent)
@@ -1642,12 +1707,18 @@ fun BatchDetailScreen(
                             message = message,
                             onPlay = { rid -> RecordingPlaybackActivity.start(context, rid) },
                         )
-                        ChatMessage.Role.SYSTEM -> Text(
-                            message.content,
-                            color = colors.textTertiary,
-                            fontSize = 12.sp,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                        )
+                        ChatMessage.Role.SYSTEM -> CopyableMessageContainer(
+                            text = message.content,
+                            colors = colors,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { longPressModifier ->
+                            Text(
+                                message.content,
+                                color = colors.textTertiary,
+                                fontSize = 12.sp,
+                                modifier = longPressModifier.padding(horizontal = 8.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -1667,7 +1738,14 @@ private fun DetailTaskHeader(colors: PokeclawColors, seq: Int, message: ChatMess
                 Text(stringResource(R.string.batch_detail_task_header, seq), color = colors.userText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(4.dp))
-            Text(message.content, color = colors.userText, fontSize = 15.sp)
+            CopyableMessageContainer(text = message.content, colors = colors) { longPressModifier ->
+                Text(
+                    message.content,
+                    color = colors.userText,
+                    fontSize = 15.sp,
+                    modifier = longPressModifier,
+                )
+            }
         }
     }
 }
@@ -1761,10 +1839,24 @@ private fun DetailStepRow(step: ToolStep, isLast: Boolean, colors: PokeclawColor
                 Text(stringResource(R.string.batch_step_params, step.params), fontSize = 10.sp, color = colors.textTertiary, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             if (step.summary.isNotBlank()) {
-                Text(step.summary, fontSize = 11.sp, color = colors.textTertiary)
+                CopyableMessageContainer(text = step.summary, colors = colors) { longPressModifier ->
+                    Text(
+                        step.summary,
+                        fontSize = 11.sp,
+                        color = colors.textTertiary,
+                        modifier = longPressModifier,
+                    )
+                }
             }
             if (!step.intent.isNullOrBlank()) {
-                Text(stringResource(R.string.batch_step_intent, step.intent), fontSize = 11.sp, color = colors.textSecondary)
+                CopyableMessageContainer(text = step.intent, colors = colors) { longPressModifier ->
+                    Text(
+                        stringResource(R.string.batch_step_intent, step.intent),
+                        fontSize = 11.sp,
+                        color = colors.textSecondary,
+                        modifier = longPressModifier,
+                    )
+                }
             }
         }
     }
@@ -1799,13 +1891,15 @@ private fun DetailResult(
             }
             HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
             if (message.content.isNotBlank()) {
-                Text(
-                    message.content,
-                    color = colors.aiText,
-                    fontSize = 15.sp,
-                    lineHeight = 21.sp,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                )
+                CopyableMessageContainer(text = message.content, colors = colors) { longPressModifier ->
+                    Text(
+                        message.content,
+                        color = colors.aiText,
+                        fontSize = 15.sp,
+                        lineHeight = 21.sp,
+                        modifier = longPressModifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    )
+                }
             }
         }
     }

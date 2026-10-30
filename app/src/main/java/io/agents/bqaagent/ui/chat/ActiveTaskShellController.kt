@@ -28,6 +28,12 @@ class ActiveTaskShellController(
 
     val activeTasks: StateFlow<List<String>> = _activeTasks.asStateFlow()
 
+    /**
+     * Routes a "stop everything" request to the chat task UI, which owns the confirmed-stopping
+     * state. This controller has no Activity reference, so the shell wires itself in here.
+     */
+    var onTaskStopRequested: (() -> Unit)? = null
+
     private val poller = object : Runnable {
         override fun run() {
             refreshActiveTasks()
@@ -57,8 +63,10 @@ class ActiveTaskShellController(
 
     fun stopAllTasks(): String {
         var requestedTaskStop = false
-        if (appViewModel.isTaskRunning()) {
-            appViewModel.stopTask()
+        if (appViewModel.isTaskRunning() || appViewModel.taskBusy.value) {
+            // Route through the task flow so the chat UI enters its "Stopping…" state; flipping the
+            // flag locally would leave the button live over a still-running loop.
+            onTaskStopRequested?.invoke()
             requestedTaskStop = true
         }
 

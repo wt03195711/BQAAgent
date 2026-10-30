@@ -12,6 +12,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.KeyEvent
 import io.agents.bqaagent.ClawApplication
+import io.agents.bqaagent.floating.FloatingCircleManager
 import io.agents.bqaagent.utils.UiTextMatchUtils
 import io.agents.bqaagent.utils.XLog
 import io.agents.bqaagent.fallback.FallbackRegistry
@@ -29,6 +30,14 @@ object LocalAdbDeviceDriver {
     private const val DEFAULT_TIMEOUT_MS = 15_000L
     private const val SCREEN_TREE_CACHE_MAX_AGE_MS = 2_000L
     private const val DETAIL_MAX_NODES = 250
+
+    private val dumpCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+    @JvmStatic
+    fun currentDumpCount(): Int = dumpCount.get()
+
+    @JvmStatic
+    fun resetDumpCount() { dumpCount.set(0) }
 
     private val nodeIdMap = ConcurrentHashMap<String, UiNode>()
     private val nodeCounter = AtomicInteger(0)
@@ -91,18 +100,65 @@ object LocalAdbDeviceDriver {
 
     @JvmStatic
     fun performTap(x: Int, y: Int): Boolean {
+        if (isBlockedByOverlay(x, y)) {
+            XLog.w(TAG, "performTap($x,$y) refused — overlapped by floating pill")
+            return false
+        }
         return execOk("input tap $x $y")
     }
 
     @JvmStatic
     fun performLongPress(x: Int, y: Int, durationMs: Long): Boolean {
+        if (isBlockedByOverlay(x, y)) {
+            XLog.w(TAG, "performLongPress($x,$y) refused — overlapped by floating pill")
+            return false
+        }
         return execOk("input swipe $x $y $x $y ${durationMs.coerceAtLeast(1L)}")
     }
 
     @JvmStatic
     fun performSwipe(startX: Int, startY: Int, endX: Int, endY: Int, durationMs: Long): Boolean {
+        // EasyFloat treats touches INSIDE the pill as a drag, so EITHER endpoint landing
+        // on the pill turns the intended "scroll the list" into "move the pill". Reject
+        // both cases; the LLM must re-plan with both endpoints in the app area.
+        if (isBlockedByOverlay(startX, startY) || isBlockedByOverlay(endX, endY)) {
+            XLog.w(TAG, "performSwipe refused — an endpoint overlaps the floating pill")
+            return false
+        }
         return execOk("input swipe $startX $startY $endX $endY ${durationMs.coerceAtLeast(1L)}")
     }
+
+    /**
+     * Central chokepoint for overlay-aware gesture logic. Returns the pill's live rect
+     * when (x, y) sits inside it, otherwise null. Automatically no-ops when the
+     * floating window feature is off, the pill is hidden, or capture suppression is
+     * running — see [FloatingCircleManager.currentOverlayBounds].
+     */
+    @JvmStatic
+    fun overlayBlockingRect(x: Int, y: Int): Rect? {
+        val r = FloatingCircleManager.currentOverlayBounds() ?: return null
+        return if (r.contains(x, y)) r else null
+    }
+
+    /**
+     * Ready-to-use LLM-facing message when a gesture is blocked by the pill. Tools
+     * call this BEFORE invoking performX and short-circuit with ToolResult.error(...)
+     * so the LLM sees a specific reason and re-plans, instead of the old "silent
+     * tap consumed by overlay → looks like the app did not respond" failure mode.
+     */
+    @JvmStatic
+    fun overlayBlockedMessage(x: Int, y: Int, action: String): String? {
+        val r = overlayBlockingRect(x, y) ?: return null
+        return "OVERLAY_BLOCKED: $action at ($x,$y) sits inside the agent's floating status pill " +
+                "[${r.left},${r.top}][${r.right},${r.bottom}] (docked ${if (FloatingCircleManager.isDockedRight()) "RIGHT" else "LEFT"} edge). " +
+                "The overlay intercepts this gesture, so the target app never receives it. " +
+                "Do NOT retry the same coordinates. Options: " +
+                "(1) scroll the target out of the pill strip first, then tap; " +
+                "(2) call get_screen_info mode=detail and pick a different node whose center is outside the rect; " +
+                "(3) if the target is only reachable under the pill, ask the user to drag the pill away."
+    }
+
+    private fun isBlockedByOverlay(x: Int, y: Int): Boolean = overlayBlockingRect(x, y) != null
 
     @JvmStatic
     fun sendKeyEvent(keyCode: Int): Boolean {
@@ -178,7 +234,13 @@ object LocalAdbDeviceDriver {
     fun takeScreenshotFile(): File? {
         val dir = File(ClawApplication.instance.getExternalFilesDir(null), "screenshots").apply { mkdirs() }
         val file = File(dir, "${System.currentTimeMillis()}.png")
-        val result = LocalAdbAutomation.exec("screencap -p ${shellQuote(file.absolutePath)}", 15_000L)
+        // The floating status pill lives in a TYPE_APPLICATION_OVERLAY window that
+        // `screencap -p` will happily bake into the image, confusing the VLM into
+        // reading "Step N · 意图…" as target-app content. Suppress it just for the
+        // capture; the pill reappears immediately after.
+        val result = FloatingCircleManager.withScreenshotSuppression {
+            LocalAdbAutomation.exec("screencap -p ${shellQuote(file.absolutePath)}", 15_000L)
+        }
         if (!result.isSuccess || !file.exists() || file.length() <= 0) {
             XLog.w(TAG, "screencap failed: ${result.combinedOutput}")
             return null
@@ -393,6 +455,21 @@ object LocalAdbDeviceDriver {
         return foregroundWindowFast().packageName
     }
 
+    /**
+     * Foreground package name + activity name captured from a SINGLE `dumpsys window`
+     * snapshot. Prefer this over calling [foregroundPackageName] and [activeActivityName]
+     * back-to-back: each of those runs its own `dumpsys window | grep` adb round-trip, so
+     * reading both fields from one snapshot halves the adb calls AND keeps the pair
+     * self-consistent (package and activity describe the same instant, never a torn
+     * mid-transition combination). The returned values are identical to the individual
+     * getters, so it is a drop-in, behaviour-preserving change.
+     */
+    @JvmStatic
+    fun foregroundPackageAndActivity(): Pair<String, String> {
+        val window = foregroundWindowFast()
+        return window.packageName to window.activityName
+    }
+
     @JvmStatic
     fun bottomEditableNode(): UiNode? {
         return dumpNodes(assignIds = true)
@@ -537,6 +614,18 @@ object LocalAdbDeviceDriver {
                 .append(" mode=").append(mode.name.lowercase())
                 .append(" package=").append(packageName.ifBlank { "unknown" })
                 .append(" nodes=").append(nodes.size).append('\n')
+            // Layer 1: expose the pill as a physical fact without polluting the tree.
+            // The pill nodes themselves are filtered by isFloatingPillNode above; here
+            // we tell the LLM "an agent overlay is blocking this rect, do not tap there".
+            // Zero output when the floating window is off / hidden — see currentOverlayBounds.
+            val overlay = FloatingCircleManager.currentOverlayBounds()
+            if (overlay != null) {
+                append("overlay_note: agent's floating status pill occupies [")
+                    .append(overlay.left).append(',').append(overlay.top).append("][")
+                    .append(overlay.right).append(',').append(overlay.bottom).append("] (docked ")
+                    .append(if (FloatingCircleManager.isDockedRight()) "RIGHT" else "LEFT").append(" edge). ")
+                    .append("Taps inside this rect are intercepted by the overlay; plan tap/swipe endpoints outside it.\n")
+            }
             val areas = findScrollAreas(nodes)
             if (areas.isNotEmpty()) {
                 append("scroll_area: ")
@@ -898,7 +987,9 @@ object LocalAdbDeviceDriver {
 
     private fun dumpNodes(assignIds: Boolean, timeoutMs: Long = DEFAULT_TIMEOUT_MS): List<UiNode> {
         val xml = dumpWindowXml(timeoutMs) ?: return emptyList()
-        return parseNodes(xml, assignIds)
+        // Snapshot the pill rect ONCE per dump — it can drift between nodes if we re-query.
+        val overlayRect = FloatingCircleManager.currentOverlayBounds()
+        return parseNodes(xml, assignIds, overlayRect)
     }
 
     /**
@@ -906,6 +997,7 @@ object LocalAdbDeviceDriver {
      * Supported on Android 8.0+; lower versions automatically fall back to the legacy v1 approach.
      */
     private fun dumpWindowXml(timeoutMs: Long = DEFAULT_TIMEOUT_MS): String? {
+        dumpCount.incrementAndGet()
         val appContext = ClawApplication.instance.applicationContext
         val cacheDir = appContext.getExternalFilesDir("uiautomator")
         cacheDir?.mkdirs()
@@ -934,7 +1026,7 @@ object LocalAdbDeviceDriver {
         return v1Result.stdout
     }
 
-    private fun parseNodes(xml: String, assignIds: Boolean): List<UiNode> {
+    private fun parseNodes(xml: String, assignIds: Boolean, overlayRect: Rect?): List<UiNode> {
         return try {
             val startedAt = SystemClock.elapsedRealtime()
             if (assignIds) {
@@ -977,7 +1069,7 @@ object LocalAdbDeviceDriver {
             inputStream.close()
 
             val result = mutableListOf<UiNode>()
-            val filteredNodeCount = collectNodes(doc.documentElement, result, assignIds)
+            val filteredNodeCount = collectNodes(doc.documentElement, result, assignIds, overlayRect)
             if (assignIds) {
                 nodeMapPackage = result.firstOrNull { it.packageName.isNotBlank() }?.packageName ?: ""
             }
@@ -996,11 +1088,24 @@ object LocalAdbDeviceDriver {
         }
     }
 
-    private fun collectNodes(domNode: Node, result: MutableList<UiNode>, assignIds: Boolean): Int {
+    private fun collectNodes(
+        domNode: Node,
+        result: MutableList<UiNode>,
+        assignIds: Boolean,
+        overlayRect: Rect?,
+    ): Int {
         var filteredNodeCount = 0
         if (domNode is Element && domNode.tagName == "node") {
             val node = domNode.toUiNode(assignIds)
-            if (node.hasVisibleBounds()) {
+            // Contamination defence: on ROMs where `uiautomator dump --compressed` leaks
+            // TYPE_APPLICATION_OVERLAY windows into the hierarchy, the floating status pill
+            // shows up as our own package and would poison nodeIdMap / quality assessment
+            // / activePackageName(). We must drop it — but ONLY the pill, never this App's
+            // real Activities, which are legitimate targets when the user's task is about
+            // BQAAgent itself (settings, chat list, batch panel, ...).
+            if (isFloatingPillNode(node, overlayRect)) {
+                filteredNodeCount++
+            } else if (node.hasVisibleBounds()) {
                 result.add(node)
                 if (assignIds) {
                     nodeIdMap[node.nodeId] = node
@@ -1011,9 +1116,38 @@ object LocalAdbDeviceDriver {
         }
         val children = domNode.childNodes
         for (i in 0 until children.length) {
-            filteredNodeCount += collectNodes(children.item(i), result, assignIds)
+            filteredNodeCount += collectNodes(children.item(i), result, assignIds, overlayRect)
         }
         return filteredNodeCount
+    }
+
+    /**
+     * True only when the node belongs to this App AND sits inside the pill's live
+     * on-screen rect. When the pill is hidden (IDLE, capture suppression, not yet
+     * created), [overlayRect] is null and every node passes through untouched —
+     * so tasks that operate on BQAAgent's own UI keep working exactly as before.
+     */
+    private fun isFloatingPillNode(node: UiNode, overlayRect: Rect?): Boolean {
+        if (overlayRect == null) return false
+        if (node.packageName != selfPackageName) return false
+        // Bounds-aware: a node belongs to the pill when its CENTER sits inside the
+        // pill rect AND it is no larger than the rect (inflated a little). The old
+        // strict-containment check missed the outer container windows (floatRoot /
+        // cardIdle / cardActive) whose bounds EQUAL the pill rect — those leaked
+        // into nodeMapPackage/activePackageName as our own package at the FRONT of
+        // the dump order. Package-name gate keeps this App's own Activities intact.
+        val expanded = Rect(
+            overlayRect.left - 4,
+            overlayRect.top - 4,
+            overlayRect.right + 4,
+            overlayRect.bottom + 4,
+        )
+        return overlayRect.contains(node.centerX, node.centerY) &&
+                expanded.contains(node.bounds)
+    }
+
+    private val selfPackageName: String by lazy {
+        runCatching { ClawApplication.instance.packageName }.getOrDefault("")
     }
 
     private fun Element.toUiNode(assignId: Boolean): UiNode {

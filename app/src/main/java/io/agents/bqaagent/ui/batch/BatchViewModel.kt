@@ -9,6 +9,7 @@ import io.agents.bqaagent.AppCapabilityCoordinator
 import io.agents.bqaagent.ClawApplication
 import io.agents.bqaagent.R
 import io.agents.bqaagent.ServiceBindingState
+import io.agents.bqaagent.TaskRunMode
 import io.agents.bqaagent.TaskStatus
 import io.agents.bqaagent.agent.llm.ActiveModelMode
 import io.agents.bqaagent.agent.llm.ModelConfigRepository
@@ -134,6 +135,14 @@ class BatchViewModel : ViewModel() {
     /** Force-releases the lock if the post-cancel teardown ever stalls (CANCEL_TEARDOWN_TIMEOUT_MS). */
     private var cancelWatchdog: Job? = null
 
+    /**
+     * Set when a confirmed stop could not be established within the bounded window. The workspace
+     * stays locked for cross-mode starts (the orchestrator still reports busy) but the batch screen
+     * shows this reason instead of pretending teardown finished.
+     */
+    private val _stopStalled = MutableStateFlow<String?>(null)
+    val stopStalled: StateFlow<String?> = _stopStalled.asStateFlow()
+
     // Forwarded from the live driver: the pending user-image upload prompt (null = no dialog).
     private val _userImagePrompt = MutableStateFlow<BatchUserImagePrompt?>(null)
     val userImagePrompt: StateFlow<BatchUserImagePrompt?> = _userImagePrompt.asStateFlow()
@@ -142,12 +151,29 @@ class BatchViewModel : ViewModel() {
     private val _sensitiveConfirmPrompt = MutableStateFlow<BatchSensitiveConfirmPrompt?>(null)
     val sensitiveConfirmPrompt: StateFlow<BatchSensitiveConfirmPrompt?> = _sensitiveConfirmPrompt.asStateFlow()
 
+    // Forwarded from the live driver: the in-flight transcript of the currently RUNNING task.
+    // Empty while no task is executing or when the run ends (the detail then falls back to the
+    // persisted/folded span exactly as before).
+    private val _liveTaskTranscript = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val liveTaskTranscript: StateFlow<List<ChatMessage>> = _liveTaskTranscript.asStateFlow()
+
     private var driver: BatchTaskDriver? = null
 
     /** Conversation this editable batch writes to; null until the first task is added or a session loads. */
     private var currentConversationId: String? = null
 
     val isRunning: Boolean get() = driver?.isRunning == true
+
+    /** True while a chat (non-batch) task owns the workspace; gates the batch screen's own entries. */
+    val chatModeBlocked = kotlinx.coroutines.flow.MutableStateFlow(false)
+
+    init {
+        viewModelScope.launch {
+            appViewModel.taskBusy.collect { busy ->
+                chatModeBlocked.value = busy && appViewModel.ownerMode() == TaskRunMode.CHAT
+            }
+        }
+    }
 
     /** Re-read the SkillCaptureMode gate (call on resume; the switch lives in Settings). */
     fun refreshGate() {
@@ -304,6 +330,10 @@ class BatchViewModel : ViewModel() {
     // ==================== Run lifecycle ====================
 
     fun startBatch(): Boolean {
+        // Cross-mode backend gate mirrored in the UI so the button never looks tappable over a
+        // foreign run; the orchestrator/driver still reject if this check is somehow bypassed.
+        if (appViewModel.taskBusy.value && appViewModel.ownerMode() != TaskRunMode.BATCH) return false
+        if (BatchTaskDriver.active() != null) return false
         if (isRunning) return false
         if (appViewModel.isTaskRunning()) {
             XLog.w(TAG, "startBatch rejected — a chat task is running")
@@ -419,12 +449,18 @@ class BatchViewModel : ViewModel() {
             newDriver.sensitiveConfirmPrompt.collect { _sensitiveConfirmPrompt.value = it }
         }
 
+        // Mirror the driver's in-flight transcript so the detail screen can render a RUNNING task live.
+        viewModelScope.launch {
+            newDriver.liveTaskTranscript.collect { _liveTaskTranscript.value = it }
+        }
+
         viewModelScope.launch {
             newDriver.state.collect { snapshot ->
                 if (!snapshot.finished) {
                     _runState.value = snapshot
                     return@collect
                 }
+                _liveTaskTranscript.value = emptyList()
                 // The run ended: reconcile the rows with the final snapshot, then drop the live snapshot
                 // so rows fall back to their own folded result.
                 //  - settled / skipped / timeout / abandoned tasks keep their result and adopt the
@@ -459,6 +495,7 @@ class BatchViewModel : ViewModel() {
                 _runState.value = null
                 _runActive.value = false
                 _cancelling.value = false
+                _stopStalled.value = null
                 cancelWatchdog?.cancel()
                 cancelWatchdog = null
             }
@@ -467,23 +504,26 @@ class BatchViewModel : ViewModel() {
     }
 
     fun cancelBatch() {
-        val d = driver ?: return
-        d.cancel()
-        // Do NOT unlock here. Hold the workspace lock ("Stopping…") while the driver tears down: stop the
-        // in-flight task, persist (the driver's finally), then let the state collector fold the results
-        // back and persistQueue. Only when that completes does the collector clear runActive/cancelling
-        // and re-enable the UI — the "stop → save → then unlock, no cross-interference" contract.
+        val d = driver ?: run {
+            // Driver lost to Activity recreation — route the stop to the shared engine so the
+            // background loop is still interrupted instead of the tap silently no-op'ing.
+            XLog.w(TAG, "cancelBatch with no local driver — routing to orchestrator + live driver")
+            io.agents.bqaagent.ui.batch.BatchTaskDriver.active()?.cancel()
+                ?: appViewModel.taskOrchestrator.cancelCurrentTask("batch-orphan")
+            _cancelling.value = true
+            null
+        }
+        d?.cancel()
         _cancelling.value = true
-        // Safety net: teardown is asynchronous. If it ever stalls, force-release after
-        // CANCEL_TEARDOWN_TIMEOUT_MS so the workspace can never stay frozen on "Stopping…". The collector
-        // cancels this watchdog the moment teardown truly completes.
+        _stopStalled.value = null
+        // The watchdog no longer force-releases the lock. It only reports the stall: unlocking over a
+        // live loop is exactly the bug this teardown path used to hide.
         cancelWatchdog?.cancel()
         cancelWatchdog = viewModelScope.launch {
             delay(CANCEL_TEARDOWN_TIMEOUT_MS)
             if (_cancelling.value) {
-                XLog.w(TAG, "Cancel teardown exceeded ${CANCEL_TEARDOWN_TIMEOUT_MS}ms — force-releasing the workspace lock")
-                _cancelling.value = false
-                _runActive.value = false
+                XLog.w(TAG, "Cancel teardown exceeded ${CANCEL_TEARDOWN_TIMEOUT_MS}ms — still stopping")
+                _stopStalled.value = appContext.getString(R.string.task_cancel_not_stopped)
             }
         }
     }
